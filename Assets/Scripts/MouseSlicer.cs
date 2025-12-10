@@ -4,9 +4,6 @@ using UnityEngine;
 public class MouseSlicer : MonoBehaviour
 { 
 
-    //指定切割物体
-    public GameObject targetObj;
-
     //起点终点坐标
     private Vector3 startPoint;
     private Vector3 endPoint;
@@ -16,6 +13,8 @@ public class MouseSlicer : MonoBehaviour
 
     //引用组件绘制可见红线
     private LineRenderer lineVisualizer;
+
+    public LayerMask sliceableLayer;//层级遮罩，只检测此层级
 
     void Start()
     {
@@ -81,17 +80,20 @@ public class MouseSlicer : MonoBehaviour
         {
             return;
         }
-
         Debug.Log($"[切割指令] Start: {slicerStart} -> End: {slicerEnd}");
 
+        RaycastHit2D[] hits = Physics2D.LinecastAll(slicerStart, slicerEnd, sliceableLayer);
+
+        Debug.Log($"[MouseSlicer] 这一刀切到了 {hits.Length} 个物体");
         //实施切割算法
-        if(targetObj != null)
+        foreach (RaycastHit2D hit in hits )
         {
-            Slicer.Slice(targetObj,slicerStart,slicerEnd);
+            GameObject target = hit.collider.gameObject;
+
+            Slicer.Slice(target,slicerStart, slicerEnd);
         }
-        else
-        {
-            Debug.LogWarning("你还没有指定要切谁！请在 MouseSlicer 组件里赋值 TargetObj");
-        }
+
+        
+
     }
 }

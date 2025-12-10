@@ -109,10 +109,11 @@ public static class Slicer
         Mesh newMesh = GenerateMesh(points);
         //实例化新物体
         GameObject newObj = new GameObject(name);
-        //继承位置，旋转，缩放
+        //继承位置，旋转，缩放,层级
         newObj.transform.position = original.transform.position;
         newObj.transform.rotation = original.transform.rotation;
         newObj.transform.localScale = original.transform.localScale;
+        newObj.layer = original.layer;
 
         //设置渲染组件
         newObj.AddComponent<MeshFilter>().mesh = newMesh;
