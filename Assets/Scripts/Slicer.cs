@@ -1,6 +1,6 @@
 using UnityEngine;
 using System.Collections.Generic;
-using System.Runtime.CompilerServices;
+using UnityEditor;
 
 public static class Slicer
 {
@@ -17,8 +17,6 @@ public static class Slicer
         //世界坐标->局部坐标
         Vector3 localP1 = target.transform.InverseTransformPoint(worldStart);
         Vector3 localP2 = target.transform.InverseTransformPoint(worldEnd);
-
-
         //转换为2D计算
         Vector2 p1 = new Vector2(localP1.x,localP1.y);
         Vector2 p2 = new Vector2(localP2.x,localP2.y);
@@ -85,20 +83,94 @@ public static class Slicer
             }
         }
 
-        if (posSide.Count == 0 || negSide.Count == 0)
+        if (posSide.Count < 3 || negSide.Count < 3 )
         {
-            Debug.Log("[Slicer] 未产生有效切割 (所有点都在同一侧)");
+            //Debug.Log("[Slicer] 未产生有效切割 (所有点都在同一侧)");
             return;
         }
 
-        Debug.Log($"[Slicer] 切割成功! 上半部分点数: {posSide.Count}, 下半部分点数: {negSide.Count}");
+        //Debug.Log($"[Slicer] 切割成功! 上半部分点数: {posSide.Count}, 下半部分点数: {negSide.Count}");
 
-        // TODO: 下一步就是利用 posSide 和 negSide 生成两个新的 Mesh
+        // 利用 posSide 和 negSide 生成两个新的 Mesh
 
+        Material originalMat = target.GetComponent<MeshRenderer>().sharedMaterial;
 
-        
- 
+        //生成两个新部分，销毁老部分
+        CreateGameObject(target, posSide, originalMat, "PositiveMesh");
+        CreateGameObject(target, negSide, originalMat, "NegativeMesh");
+
+        GameObject.Destroy(target);
+
     }
+    //物体生成与物理继承逻辑
+    private static void CreateGameObject(GameObject original,List<VertexData> points, Material mat, string name)
+    {
+        //生成新mesh
+        Mesh newMesh = GenerateMesh(points);
+        //实例化新物体
+        GameObject newObj = new GameObject(name);
+        //继承位置，旋转，缩放
+        newObj.transform.position = original.transform.position;
+        newObj.transform.rotation = original.transform.rotation;
+        newObj.transform.localScale = original.transform.localScale;
+
+        //设置渲染组件
+        newObj.AddComponent<MeshFilter>().mesh = newMesh;
+        newObj.AddComponent<MeshRenderer>().material = mat;
+
+        //设置碰撞体
+        PolygonCollider2D collider = newObj.AddComponent<PolygonCollider2D>();
+        Vector2[] path = new Vector2[points.Count];
+        for(int i=0;i<points.Count; i++)
+        {
+            path[i] = new Vector2(points[i].Position.x,points[i].Position.y);
+        }
+        collider.SetPath(0,path);
+
+        //设置物理效果并继承动量
+        Rigidbody2D newRb = newObj.AddComponent<Rigidbody2D>();
+        Rigidbody2D oldRb = original.GetComponent<Rigidbody2D>();
+        if(oldRb != null)
+        {
+            newRb.linearVelocity = oldRb.linearVelocity;
+            newRb.angularVelocity = oldRb.angularVelocity;//线速度角速度
+        }
+    }
+
+    //三角剖分（现在进行扇形剖分，因为只切割正方形，之后切割凹多边形改成耳切法）
+    private static Mesh GenerateMesh(List<VertexData> points)
+    {
+        Vector3[] vertices = new Vector3[points.Count];
+        Vector2[] uvs = new Vector2[points.Count];
+
+        for(int i=0;i<points.Count;i++)
+        {
+            vertices[i] = points[i].Position;
+            uvs[i] = points[i].UV;
+        }
+
+        //扇形剖分,形成n-2个三角形
+        int triangleCount = points.Count - 2;
+        int[] triangles = new int[triangleCount * 3];
+
+        for(int i = 0; i < triangleCount; i++)
+        {
+            triangles[i * 3] = 0;
+            triangles[i * 3 + 1] = i + 1;
+            triangles[i * 3 + 2] = i + 2;
+        }
+
+        Mesh mesh = new Mesh();
+        mesh.vertices = vertices;
+        mesh.uv = uvs;
+        mesh.triangles = triangles;
+
+        //计算法线修正渲染
+        mesh.RecalculateNormals();
+        mesh.RecalculateBounds();
+        return mesh;
+    }
+
     //预备几何算法
     //点是否在直线左侧
     private static bool IsPointOnPositiveSide(Vector2 lineStart, Vector2 lineEnd, Vector2 p)
