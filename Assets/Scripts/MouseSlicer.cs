@@ -2,7 +2,12 @@ using System;
 using UnityEngine;
 
 public class MouseSlicer : MonoBehaviour
-{   //起点终点坐标
+{ 
+
+    //指定切割物体
+    public GameObject targetObj;
+
+    //起点终点坐标
     private Vector3 startPoint;
     private Vector3 endPoint;
 
@@ -80,5 +85,13 @@ public class MouseSlicer : MonoBehaviour
         Debug.Log($"[切割指令] Start: {slicerStart} -> End: {slicerEnd}");
 
         //实施切割算法
+        if(targetObj != null)
+        {
+            Slicer.Slice(targetObj,slicerStart,slicerEnd);
+        }
+        else
+        {
+            Debug.LogWarning("你还没有指定要切谁！请在 MouseSlicer 组件里赋值 TargetObj");
+        }
     }
 }
