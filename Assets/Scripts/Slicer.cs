@@ -138,28 +138,23 @@ public static class Slicer
         }
     }
 
-    //三角剖分（现在进行扇形剖分，因为只切割正方形，之后切割凹多边形改成耳切法）
+    //三角剖分(耳切法)
     private static Mesh GenerateMesh(List<VertexData> points)
     {
         Vector3[] vertices = new Vector3[points.Count];
         Vector2[] uvs = new Vector2[points.Count];
 
+        Vector2[] points2D = new Vector2[points.Count];
+
         for(int i=0;i<points.Count;i++)
         {
             vertices[i] = points[i].Position;
             uvs[i] = points[i].UV;
+            points2D[i] = new Vector2(points[i].Position.x, points[i].Position.y);
         }
 
-        //扇形剖分,形成n-2个三角形
-        int triangleCount = points.Count - 2;
-        int[] triangles = new int[triangleCount * 3];
-
-        for(int i = 0; i < triangleCount; i++)
-        {
-            triangles[i * 3] = 0;
-            triangles[i * 3 + 1] = i + 1;
-            triangles[i * 3 + 2] = i + 2;
-        }
+        int[] triangles = Triangulator.Triangulate(points2D);
+        
 
         Mesh mesh = new Mesh();
         mesh.vertices = vertices;

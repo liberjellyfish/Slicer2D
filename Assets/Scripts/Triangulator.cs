@@ -20,7 +20,7 @@ public static class Triangulator
     }
 
     //进行三角剖分
-    public static int[] Trianglulate(Vector2[] vertices)
+    public static int[] Triangulate(Vector2[] vertices)
     {
         int n = vertices.Length;
         if (n < 3) return new int[0];
