@@ -1,139 +1,226 @@
 using UnityEngine;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices; // 用于性能优化注解
 
+/// <summary>
+/// 静态切割工具类：负责处理几何切割、拓扑重构与网格生成
+/// </summary>
 public static class Slicer
 {
-    //存储顶点信息
+    #region 数据结构定义
+
+    // 使用结构体减少GC，包含 ID 用于排序唯一性校验
     public struct VertexData
     {
-        public Vector3 Position;
-        public Vector2 UV;
+        public Vector3 Position;    // 局部坐标
+        public Vector2 UV;          // 纹理坐标
+        public bool IsIntersection; // 是否为切割产生的交点
+        public int ID;              // 全局唯一ID (用于字典索引)
     }
 
-    //切割核心入口
-    public static void Slice(GameObject target, Vector3 worldStart,Vector3 worldEnd)
-    {
-        //世界坐标->局部坐标
-        Vector3 localP1 = target.transform.InverseTransformPoint(worldStart);
-        Vector3 localP2 = target.transform.InverseTransformPoint(worldEnd);
-        //转换为2D计算
-        Vector2 p1 = new Vector2(localP1.x,localP1.y);
-        Vector2 p2 = new Vector2(localP2.x,localP2.y);
+    #endregion
 
-        //获取网格数据
+    #region Public API (对外接口)
+
+    /// <summary>
+    /// 执行切割操作的主入口
+    /// </summary>
+    /// <param name="target">被切割的物体</param>
+    /// <param name="worldStart">切割线起点(世界坐标)</param>
+    /// <param name="worldEnd">切割线终点(世界坐标)</param>
+    public static void Slice(GameObject target, Vector3 worldStart, Vector3 worldEnd)
+    {
+        // 1. === 坐标系转换 ===
+        // 缓存 Transform 减少调用开销
+        Transform t = target.transform;
+        Vector3 localP1 = t.InverseTransformPoint(worldStart);
+        Vector3 localP2 = t.InverseTransformPoint(worldEnd);
+
+        // 转换为 2D 切割平面 (XY)
+        Vector2 sliceStart = new Vector2(localP1.x, localP1.y);
+        Vector2 sliceEnd = new Vector2(localP2.x, localP2.y);
+
+        // 2. === 获取原始网格数据 ===
         MeshFilter meshFilter = target.GetComponent<MeshFilter>();
         if (meshFilter == null) return;
 
         Mesh originalMesh = meshFilter.mesh;
+        // 缓存顶点和UV数组
         Vector3[] oldVertices = originalMesh.vertices;
         Vector2[] oldUVs = originalMesh.uv;
 
-        //准备数据表
-        List<Vector2> originalPoly2D = new List<Vector2>();
-        List<VertexData> shapePoints = new List<VertexData>();
-        for(int i=0;i<oldVertices.Length;i++)
+        // 优化：预分配 List 容量，避免循环中频繁扩容
+        // 预估容量：原顶点数 + 预留几个交点空间
+        int capacity = oldVertices.Length + 4;
+        List<VertexData> shapePoints = new List<VertexData>(capacity);
+
+        int globalIDCounter = 0;
+
+        // 初始化顶点数据
+        for (int i = 0; i < oldVertices.Length; i++)
         {
-            shapePoints.Add(new VertexData { Position = oldVertices[i], UV = oldUVs[i] });
-            originalPoly2D.Add(new Vector2(oldVertices[i].x, oldVertices[i].y));
+            shapePoints.Add(new VertexData
+            {
+                Position = oldVertices[i],
+                UV = oldUVs[i],
+                IsIntersection = false,
+                ID = globalIDCounter++
+            });
         }
 
-        //准备两列表
-        List<VertexData> posSide = new List<VertexData>();
-        List<VertexData> negSide = new List<VertexData>();
+        // 3. === 核心几何切割 (Sutherland-Hodgman) ===
+        // 预分配结果列表
+        List<VertexData> posSide = new List<VertexData>(capacity);
+        List<VertexData> negSide = new List<VertexData>(capacity);
 
-        //核心几何算法
-        for (int i = 0; i < shapePoints.Count; i++)
+        PerformSutherlandHodgman(shapePoints, sliceStart, sliceEnd, ref globalIDCounter, posSide, negSide);
+
+        // 校验有效性
+        if (posSide.Count < 3 || negSide.Count < 3) return;
+
+        // 4. === 拓扑重构与物体生成 ===
+        Material originalMat = target.GetComponent<MeshRenderer>().sharedMaterial;
+
+        // 传入切线信息用于拓扑排序
+        CreateObjectsFromTopology(target, posSide, originalMat, "PositiveMesh", sliceStart, sliceEnd);
+        CreateObjectsFromTopology(target, negSide, originalMat, "NegativeMesh", sliceStart, sliceEnd);
+
+        // 销毁原物体
+        GameObject.Destroy(target);
+    }
+
+    #endregion
+
+    #region Core Logic (核心切割逻辑)
+
+    /// <summary>
+    /// 执行 Sutherland-Hodgman 多边形裁剪算法
+    /// </summary>
+    private static void PerformSutherlandHodgman(
+        List<VertexData> inputPoints,
+        Vector2 lineStart,
+        Vector2 lineEnd,
+        ref int idCounter,
+        List<VertexData> posSide,
+        List<VertexData> negSide)
+    {
+        int count = inputPoints.Count;
+        for (int i = 0; i < count; i++)
         {
-            // 获取当前边的两个端点
-            VertexData v1 = shapePoints[i];
-            VertexData v2 = shapePoints[(i + 1) % shapePoints.Count]; // 取模以形成闭环
+            VertexData v1 = inputPoints[i];
+            VertexData v2 = inputPoints[(i + 1) % count]; // 闭环处理
 
-            // 判断这两个点在直线的哪一侧
-            // 注意：这里使用的是基于直线的判定，哪怕线段没有物理接触，
-            // 只要这两个点分布在无限直线的两侧，依然会被判为 true/false 不同
-            bool v1Side = IsPointOnPositiveSide(p1, p2, v1.Position);
-            bool v2Side = IsPointOnPositiveSide(p1, p2, v2.Position);
+            bool v1Side = IsPointOnPositiveSide(lineStart, lineEnd, v1.Position);
+            bool v2Side = IsPointOnPositiveSide(lineStart, lineEnd, v2.Position);
 
-            // 逻辑分支
             if (v1Side == v2Side)
             {
-                // 情况 A: 两个点在同一侧 -> 只要保留 V1
+                // 情况A：两点同侧 -> 保留 v1
                 if (v1Side) posSide.Add(v1);
                 else negSide.Add(v1);
             }
             else
             {
-                // 情况 B: 两个点在不同侧 -> 说明被线切断了
-                // 1. 先加入 V1
+                // 情况B：两点异侧 -> 连线被切断
+                // 1. 先保留 v1
                 if (v1Side) posSide.Add(v1);
                 else negSide.Add(v1);
 
-                // 2. 计算交点 (Intersection)
-                float t = GetIntersectionT(p1, p2, v1.Position, v2.Position);
+                // 2. 计算并生成交点
+                float t = GetIntersectionT(lineStart, lineEnd, v1.Position, v2.Position);
 
-                // 3. 插值生成新顶点
                 VertexData intersectionPoint = new VertexData();
                 intersectionPoint.Position = Vector3.Lerp(v1.Position, v2.Position, t);
                 intersectionPoint.UV = Vector2.Lerp(v1.UV, v2.UV, t);
+                intersectionPoint.IsIntersection = true;
+                intersectionPoint.ID = idCounter++; // 分配唯一ID
 
-                //P = A + (B - A) * t
-
-                // 4. 交点是两个新形状共有的，都要加入
+                // 3. 交点同时加入两侧
                 posSide.Add(intersectionPoint);
                 negSide.Add(intersectionPoint);
             }
         }
-
-        if (posSide.Count < 3 || negSide.Count < 3 )
-        {
-            //Debug.Log("[Slicer] 未产生有效切割 (所有点都在同一侧)");
-            return;
-        }
-
-        //Debug.Log($"[Slicer] 切割成功! 上半部分点数: {posSide.Count}, 下半部分点数: {negSide.Count}");
-
-        // 利用 posSide 和 negSide 生成两个新的 Mesh
-
-        Material originalMat = target.GetComponent<MeshRenderer>().sharedMaterial;
-
-        //生成两个新部分，销毁老部分
-        CreateObjectsFromTopology(target, posSide, originalMat, "PositiveMesh", p1, p2, originalPoly2D);
-        CreateObjectsFromTopology(target, negSide, originalMat, "NegativeMesh", p1, p2, originalPoly2D);
-
-
-        GameObject.Destroy(target);
-
     }
-    // 拓扑分离与生成逻辑
-    private static void CreateObjectsFromTopology(GameObject original, List<VertexData> rawPoints, Material mat, string baseName, Vector2 lineStart, Vector2 lineEnd, List<Vector2> originalPoly)
+
+    /// <summary>
+    /// 处理切割后的数据，生成游戏物体
+    /// </summary>
+    private static void CreateObjectsFromTopology(
+        GameObject original,
+        List<VertexData> rawPoints,
+        Material mat,
+        string baseName,
+        Vector2 lineStart,
+        Vector2 lineEnd)
     {
-        // A. 预处理：分离多边形
-        // 如果顶点列表穿过了"空气"（原始多边形外部），将其剪断
-        List<List<VertexData>> polygons = SplitPolygonByValidity(rawPoints, lineStart, lineEnd, originalPoly);
+        // 1. 拓扑分离：根据交点排序剪断“非法跨越”的边
+        List<List<VertexData>> polygons = SplitPolygonBySortedIntersections(rawPoints, lineStart, lineEnd);
 
         int counter = 0;
         foreach (var polyPoints in polygons)
         {
+            // 过滤无效碎片
             if (polyPoints.Count < 3) continue;
 
-            // B. 生成 Mesh (MeshSeparator 依然保留作为双重保险)
+            // 2. 生成临时大网格
             Mesh bigMesh = GenerateMesh(polyPoints);
+
+            // 3. 二次检查：物理离岛分离 (处理那种没有交点但物理断开的情况)
             List<Mesh> separatedMeshes = MeshSeparator.Separate(bigMesh);
 
+            // 4. 实例化最终物体
             foreach (var subMesh in separatedMeshes)
             {
-                CreateSingleGameObject(original, subMesh, mat, $"{baseName}_{counter++}");
+                InstantiateSplitObject(original, subMesh, mat, $"{baseName}_{counter++}");
             }
         }
     }
 
-    // 【新增】根据边的有效性剪断多边形
-    private static List<List<VertexData>> SplitPolygonByValidity(List<VertexData> points, Vector2 lineStart, Vector2 lineEnd, List<Vector2> originalPoly)
+    #endregion
+
+    #region Topology (拓扑排序与重构)
+
+    /// <summary>
+    /// 【核心算法】基于交点 Rank 排序的拓扑分离
+    /// </summary>
+    private static List<List<VertexData>> SplitPolygonBySortedIntersections(
+        List<VertexData> points,
+        Vector2 lineStart,
+        Vector2 lineEnd)
     {
+        // Step 1: 提取交点
+        List<VertexData> intersections = new List<VertexData>();
+        for (int i = 0; i < points.Count; i++)
+        {
+            if (points[i].IsIntersection) intersections.Add(points[i]);
+        }
+
+        // 容错：必须成对出现
+        if (intersections.Count % 2 != 0)
+            return new List<List<VertexData>>() { points };
+
+        // Step 2: 对交点排序 (投影到切割线上)
+        Vector2 lineDir = (lineEnd - lineStart).normalized;
+        intersections.Sort((a, b) => {
+            float distA = Vector2.Dot(new Vector2(a.Position.x, a.Position.y), lineDir);
+            float distB = Vector2.Dot(new Vector2(b.Position.x, b.Position.y), lineDir);
+            return distA.CompareTo(distB);
+        });
+
+        // Step 3: 建立 Rank 索引表 (ID -> Rank)
+        Dictionary<int, int> intersectionRank = new Dictionary<int, int>(intersections.Count);
+        for (int i = 0; i < intersections.Count; i++)
+        {
+            intersectionRank[intersections[i].ID] = i;
+        }
+
+        // Step 4: 巡逻一圈，根据 Rank 判定是否剪断
         List<List<VertexData>> result = new List<List<VertexData>>();
-        List<VertexData> currentChain = new List<VertexData>();
+        List<VertexData> currentChain = new List<VertexData>(points.Count);
 
         int n = points.Count;
+        bool lastEdgeWasCut = false;
+
         for (int i = 0; i < n; i++)
         {
             VertexData p1 = points[i];
@@ -141,69 +228,70 @@ public static class Slicer
 
             currentChain.Add(p1);
 
-            // 检查这条边是否位于切割线上
-            if (IsPointOnLine(lineStart, lineEnd, p1.Position) && IsPointOnLine(lineStart, lineEnd, p2.Position))
+            // 如果这条边的两端都是交点，它是潜在的“桥”
+            if (p1.IsIntersection && p2.IsIntersection)
             {
-                // 如果两点都在切割线上，这就是一个潜在的"切面"或"跨越空隙的线"
-                // 检查中点是否在原始多边形内
-                Vector2 midPoint = (new Vector2(p1.Position.x, p1.Position.y) + new Vector2(p2.Position.x, p2.Position.y)) * 0.5f;
-
-                if (!IsPointInPolygon(originalPoly, midPoint))
+                if (intersectionRank.TryGetValue(p1.ID, out int rank1) &&
+                    intersectionRank.TryGetValue(p2.ID, out int rank2))
                 {
-                    // === 发现非法边（跨越空隙） ===
-                    // 在这里剪断！currentChain 结束，打包存入结果
-                    if (currentChain.Count >= 3)
+                    int rankDiff = Mathf.Abs(rank1 - rank2);
+                    int minRank = Mathf.Min(rank1, rank2);
+
+                    // === 剪断判据 ===
+                    // 1. RankDiff != 1: 跨级连接（如 0 连到 3），必断
+                    // 2. MinRank 是奇数: 位于 (Out->In) 区间，是空气，必断
+                    if (rankDiff != 1 || minRank % 2 != 0)
                     {
-                        result.Add(new List<VertexData>(currentChain));
+                        // 剪断！打包当前链条
+                        if (currentChain.Count >= 3)
+                        {
+                            result.Add(new List<VertexData>(currentChain));
+                        }
+                        // 开启新链条
+                        currentChain = new List<VertexData>(points.Count);
+                        if (i == n - 1) lastEdgeWasCut = true;
                     }
-                    currentChain.Clear();
-                    // 注意：因为是循环列表，断开处的 p2 应该是下一条链的起点，循环继续时自然会作为 p1 被加入
                 }
             }
         }
 
-        // 处理循环列表的闭合问题
-        // 如果 currentChain 不为空，且没有被剪断（说明最后一环是合法的），
-        // 或者因为剪断导致变成非闭合链。
-        // 这里简化逻辑：如果是因剪断产生的链，通常需要闭合。
-        // 但由于 Sutherland-Hodgman 的特性，剪断后的链首尾通常就是切割点，直接闭合即可形成合法多边形。
-
+        // Step 5: 首尾闭合逻辑 (修复环状物体被误切)
         if (currentChain.Count > 0)
         {
-            // 如果只有一条链（从未剪断），直接返回
-            if (result.Count == 0)
+            // 如果最后一条边是实心的（没断），说明它是第一块碎片的前半部分
+            if (!lastEdgeWasCut && result.Count > 0)
+            {
+                result[0].InsertRange(0, currentChain);
+            }
+            else if (currentChain.Count >= 3)
             {
                 result.Add(currentChain);
-            }
-            else
-            {
-                // 如果有多条链，最后一条链其实是第一条链的"前半部分"（因为循环被切断了）
-                // 我们需要把最后一条链拼接到第一条链的开头
-                // 举例：原本是 O-O-X-X-O-O (X是断点)，切断后变成 [O-O], [O-O]。
-                // 实际逻辑中，我们简单地把这一段也作为一个新多边形尝试闭合
-                // 或者更严谨地：检查首尾是否相连。
-                // 鉴于切割产生的拓扑通常比较整齐，直接添加大多能工作
-                if (currentChain.Count >= 3)
-                {
-                    result.Add(currentChain);
-                }
             }
         }
 
         return result;
     }
 
-    private static void CreateSingleGameObject(GameObject original, Mesh mesh, Material mat, string name)
+    #endregion
+
+    #region Mesh Generation (网格与对象生成)
+
+    private static void InstantiateSplitObject(GameObject original, Mesh mesh, Material mat, string name)
     {
         GameObject newObj = new GameObject(name);
-        newObj.transform.position = original.transform.position;
-        newObj.transform.rotation = original.transform.rotation;
-        newObj.transform.localScale = original.transform.localScale;
+        Transform t = newObj.transform;
+        Transform originalT = original.transform;
+
+        // 继承变换
+        t.SetPositionAndRotation(originalT.position, originalT.rotation);
+        t.localScale = originalT.localScale;
         newObj.layer = original.layer;
 
+        // 添加渲染组件
         newObj.AddComponent<MeshFilter>().mesh = mesh;
         newObj.AddComponent<MeshRenderer>().material = mat;
 
+        // 生成碰撞体 (关键：边缘提取)
         PolygonCollider2D collider = newObj.AddComponent<PolygonCollider2D>();
         Vector2[] boundary = GetBoundaryPath(mesh);
 
@@ -213,13 +301,14 @@ public static class Slicer
         }
         else
         {
-            // 降级方案：凸包或原点集
+            // 兜底方案：使用凸包或直接点集
             Vector2[] fallback = new Vector2[mesh.vertexCount];
             for (int k = 0; k < mesh.vertexCount; k++)
-                fallback[k] = new Vector2(mesh.vertices[k].x, mesh.vertices[k].y);
+                fallback[k] = mesh.vertices[k]; // Vector3隐式转Vector2
             collider.SetPath(0, fallback);
         }
 
+        // 继承物理速度
         Rigidbody2D newRb = newObj.AddComponent<Rigidbody2D>();
         Rigidbody2D oldRb = original.GetComponent<Rigidbody2D>();
         if (oldRb != null)
@@ -229,97 +318,47 @@ public static class Slicer
         }
     }
 
-    // 判断点是否在任意多边形内 (射线法)
-    private static bool IsPointInPolygon(List<Vector2> polygon, Vector2 p)
+    private static Mesh GenerateMesh(List<VertexData> points)
     {
-        bool inside = false;
-        int j = polygon.Count - 1;
-        for (int i = 0; i < polygon.Count; j = i++)
+        int count = points.Count;
+        Vector3[] vertices = new Vector3[count];
+        Vector2[] uvs = new Vector2[count];
+        Vector2[] points2D = new Vector2[count];
+
+        for (int i = 0; i < count; i++)
         {
-            if (((polygon[i].y > p.y) != (polygon[j].y > p.y)) &&
-                (p.x < (polygon[j].x - polygon[i].x) * (p.y - polygon[i].y) / (polygon[j].y - polygon[i].y) + polygon[i].x))
-            {
-                inside = !inside;
-            }
+            vertices[i] = points[i].Position;
+            uvs[i] = points[i].UV;
+            points2D[i] = new Vector2(points[i].Position.x, points[i].Position.y);
         }
-        return inside;
+
+        // 调用耳切法
+        int[] triangles = Triangulator.Triangulate(points2D);
+
+        Mesh mesh = new Mesh();
+        mesh.vertices = vertices;
+        mesh.uv = uvs;
+        mesh.triangles = triangles;
+
+        mesh.RecalculateNormals();
+        mesh.RecalculateBounds();
+        return mesh;
     }
 
-    // 判断点是否在直线上（带误差容忍）
-    private static bool IsPointOnLine(Vector2 lineStart, Vector2 lineEnd, Vector3 point)
-    {
-        // 计算点到直线的距离
-        float d = Mathf.Abs((lineEnd.x - lineStart.x) * (point.y - lineStart.y) - (lineEnd.y - lineStart.y) * (point.x - lineStart.x));
-        // 分母（线段长）
-        float len = Vector2.Distance(lineStart, lineEnd);
-        // 距离公式 d / len
-        return (d / len) < 0.001f; // 1mm 的误差容忍
-    }
-
-    //物体生成与物理继承逻辑
-    private static void CreateGameObject(GameObject original,List<VertexData> points, Material mat, string name)
-    {
-        //生成包含所有碎片的总Mesh
-        Mesh bigMesh = GenerateMesh(points);
-        //分离Mesh
-        List<Mesh> seperatedMeshes = MeshSeparator.Separate(bigMesh);
-
-        for(int i = 0; i < seperatedMeshes.Count; i++)
-        {
-            Mesh subMesh = seperatedMeshes[i];
-            //实例化新物体
-            GameObject newObj = new GameObject($"{name}_{i}");
-            //继承位置，旋转，缩放,层级
-            newObj.transform.position = original.transform.position;
-            newObj.transform.rotation = original.transform.rotation;
-            newObj.transform.localScale = original.transform.localScale;
-            newObj.layer = original.layer;
-            //设置渲染组件
-            newObj.AddComponent<MeshFilter>().mesh = subMesh;
-            newObj.AddComponent<MeshRenderer>().material = mat;
-            //设置碰撞体
-            PolygonCollider2D collider = newObj.AddComponent<PolygonCollider2D>();
-
-
-            Vector2[] boundaryPath = GetBoundaryPath(subMesh);
-            if (boundaryPath != null && boundaryPath.Length >= 3)
-            {
-                collider.SetPath(0, boundaryPath);
-            }
-            else
-            {
-                // 如果提取失败，回退到凸包或原点集
-                Vector2[] fallback = new Vector2[subMesh.vertexCount];
-                for (int k = 0; k < subMesh.vertexCount; k++)
-                {
-                    fallback[k] = new Vector2(subMesh.vertices[k].x, subMesh.vertices[k].y);
-                }
-                collider.SetPath(0, fallback);
-            }
-            //设置物理效果并继承动量
-            Rigidbody2D newRb = newObj.AddComponent<Rigidbody2D>();
-            Rigidbody2D oldRb = original.GetComponent<Rigidbody2D>();
-            if (oldRb != null)
-            {
-                newRb.linearVelocity = oldRb.linearVelocity;
-                newRb.angularVelocity = oldRb.angularVelocity;
-            }
-        }
-    }
-
-    // 提取 Mesh 边缘算法
-    // 原理：遍历所有边，只出现一次的边就是边缘边
+    /// <summary>
+    /// 提取 Mesh 的唯一外轮廓路径
+    /// </summary>
     private static Vector2[] GetBoundaryPath(Mesh mesh)
     {
         int[] tris = mesh.triangles;
         Vector3[] verts = mesh.vertices;
 
-        // 记录边的出现次数。Key: "小索引_大索引"
-        Dictionary<long, int> edgeCounts = new Dictionary<long, int>();
-        // 记录边的方向，以便重建回路。Key: 起点, Value: 终点
-        Dictionary<int, int> edgeGraph = new Dictionary<int, int>();
+        // 优化：指定 Dictionary 容量
+        int estimatedEdges = tris.Length;
+        Dictionary<long, int> edgeCounts = new Dictionary<long, int>(estimatedEdges);
+        Dictionary<int, int> edgeGraph = new Dictionary<int, int>(estimatedEdges / 3);
 
-        // 1. 统计边
+        // 1. 统计边频次
         for (int i = 0; i < tris.Length; i += 3)
         {
             AddEdge(edgeCounts, tris[i], tris[i + 1]);
@@ -327,7 +366,7 @@ public static class Slicer
             AddEdge(edgeCounts, tris[i + 2], tris[i]);
         }
 
-        // 2. 筛选出边缘边 (只出现1次的边)
+        // 2. 筛选边界边 (频次=1)
         for (int i = 0; i < tris.Length; i += 3)
         {
             ProcessBoundaryEdge(edgeCounts, edgeGraph, tris[i], tris[i + 1]);
@@ -337,109 +376,76 @@ public static class Slicer
 
         if (edgeGraph.Count == 0) return null;
 
-        // 3. 构建回路 (顺藤摸瓜)
-        List<Vector2> path = new List<Vector2>();
-
-        // 找到任意一个起始点
+        // 3. 构建闭合回路
+        List<Vector2> path = new List<Vector2>(verts.Length);
         int startNode = 0;
         foreach (var key in edgeGraph.Keys) { startNode = key; break; }
 
         int current = startNode;
         int safety = 0;
+        int maxLoop = verts.Length * 2; // 安全限制
 
-        while (safety++ < verts.Length + 10)
+        while (safety++ < maxLoop)
         {
-            path.Add(new Vector2(verts[current].x, verts[current].y));
+            path.Add(verts[current]); // Vector3 -> Vector2
 
-            if (edgeGraph.ContainsKey(current))
+            if (edgeGraph.TryGetValue(current, out int nextNode))
             {
-                current = edgeGraph[current];
+                current = nextNode;
             }
-            else
-            {
-                break; // 断路了
-            }
+            else break;
 
-            if (current == startNode) break; // 闭环完成
+            if (current == startNode) break;
         }
 
         return path.ToArray();
     }
 
+    // 内联优化：高频调用的 Helper
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void AddEdge(Dictionary<long, int> counts, int a, int b)
     {
-        // 保证 Key 唯一，无视方向
         long key = a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a;
-        if (counts.ContainsKey(key)) counts[key]++;
-        else counts[key] = 1;
+        if (counts.ContainsKey(key)) counts[key]++; else counts[key] = 1;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void ProcessBoundaryEdge(Dictionary<long, int> counts, Dictionary<int, int> graph, int a, int b)
     {
         long key = a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a;
         if (counts[key] == 1)
         {
-            // 这是边缘边，记录方向 a -> b
-            // 注意：这里假设三角形是顺/逆时针统一的
-            // 如果图是不连通的，可能需要更复杂的逻辑，但在 MeshSeparator 之后应该是连通的
             if (!graph.ContainsKey(a)) graph[a] = b;
         }
     }
 
+    #endregion
 
-    //三角剖分(耳切法)
-    private static Mesh GenerateMesh(List<VertexData> points)
+    #region Math & Geometry (高性能数学计算)
+
+    // 内联优化
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsPointOnPositiveSide(Vector2 lineStart, Vector2 lineEnd, Vector3 p)
     {
-        Vector3[] vertices = new Vector3[points.Count];
-        Vector2[] uvs = new Vector2[points.Count];
-
-        Vector2[] points2D = new Vector2[points.Count];
-
-        for(int i=0;i<points.Count;i++)
-        {
-            vertices[i] = points[i].Position;
-            uvs[i] = points[i].UV;
-            points2D[i] = new Vector2(points[i].Position.x, points[i].Position.y);
-        }
-
-        int[] triangles = Triangulator.Triangulate(points2D);
-        
-
-        Mesh mesh = new Mesh();
-        mesh.vertices = vertices;
-        mesh.uv = uvs;
-        mesh.triangles = triangles;
-
-        //计算法线修正渲染
-        mesh.RecalculateNormals();
-        mesh.RecalculateBounds();
-        return mesh;
+        // 二维叉积：(LineVec) x (PointVec)
+        // 展开: (x2-x1)*(py-y1) - (y2-y1)*(px-x1)
+        return ((lineEnd.x - lineStart.x) * (p.y - lineStart.y) - (lineEnd.y - lineStart.y) * (p.x - lineStart.x)) > 0;
     }
 
-    //预备几何算法
-    //点是否在直线左侧
-    private static bool IsPointOnPositiveSide(Vector2 lineStart, Vector2 lineEnd, Vector2 p)
-    {
-        Vector2 lineVec = lineEnd - lineStart;
-        Vector2 pointVec = p - lineStart;
-
-        // 二维叉积: x1*y2 - x2*y1
-        // 结果 > 0 代表在左侧， < 0 代表在右侧， = 0 在线上
-        float crossProduct = lineVec.x * pointVec.y - lineVec.y * pointVec.x;
-
-        return crossProduct > 0;
-    }
-    //计算直线与线段的交点比例（0-1）
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static float GetIntersectionT(Vector2 lineStart, Vector2 lineEnd, Vector2 segStart, Vector2 segEnd)
     {
         float d1 = SignedDistance(lineStart, lineEnd, segStart);
         float d2 = SignedDistance(lineStart, lineEnd, segEnd);
-
+        // 使用 Abs 避免符号判断，提高指令流水线效率
         return Mathf.Abs(d1) / (Mathf.Abs(d1) + Mathf.Abs(d2));
     }
-    //点到直线有向距离
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static float SignedDistance(Vector2 lineStart, Vector2 lineEnd, Vector2 p)
     {
         return (lineEnd.x - lineStart.x) * (p.y - lineStart.y) - (lineEnd.y - lineStart.y) * (p.x - lineStart.x);
     }
+
+    #endregion
 }
