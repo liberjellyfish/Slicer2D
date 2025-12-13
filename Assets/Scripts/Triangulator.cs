@@ -137,6 +137,11 @@ public static class Triangulator
         foreach(var r in reflecVertices)
         {
             if (r == v.Prev || r == v || r == v.Next) continue;
+
+            if (Vector2.SqrMagnitude(r.Position - a) < 1e-10f ||
+                Vector2.SqrMagnitude(r.Position - b) < 1e-10f ||
+                Vector2.SqrMagnitude(r.Position - c) < 1e-10f) continue;//·ÀÖ¹¹²Ïß´íÎóÅÐ¶Ï
+
             if (IsPointInTriangle(a, b, c, r.Position)) return false;
         }
         return true;

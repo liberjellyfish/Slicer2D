@@ -1,56 +1,71 @@
 using UnityEngine;
-using UnityEngine.Rendering.Universal;
+using System.Collections.Generic;
 
 [ExecuteAlways]
-[RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
+[RequireComponent(typeof(MeshFilter), typeof(MeshRenderer), typeof(PolygonCollider2D))]
 public class CustomPolygon : MonoBehaviour
 {
-    public Vector2[] points;
+    // 定义外圈 (逆时针)
+    private List<Vector2> outerLoop = new List<Vector2>()
+    {
+        new Vector2(-2, -2),
+        new Vector2(2, -2),
+        new Vector2(2, 2),
+        new Vector2(-2, 2)
+    };
+
+    // 定义内圈 (顺时针 - 这是一个洞)
+    private List<Vector2> innerHole = new List<Vector2>()
+    {
+        new Vector2(-1, 1),
+        new Vector2(1, 1),
+        new Vector2(1, -1),
+        new Vector2(-1, -1)
+    };
+
     void OnEnable()
     {
-        if(points == null || points.Length < 3)
-        {
-            points = new Vector2[]//默认凹多边形
-            {
-                new Vector2(0,0),
-                new Vector2(1, 1),    
-                new Vector2(-1, 1),   
-                new Vector2(-1, -1),  
-                new Vector2(1, -1)
-            }; 
-        }
         GenerateMesh();
     }
 
-    [ContextMenu("Refresh Mesh")]
+    [ContextMenu("Refresh Donut")]
     void GenerateMesh()
     {
-        //定义顶点，顺时针
-        Vector3[] vertices = new Vector3[points.Length];
+        // 1. 准备数据
+        List<List<Vector2>> holes = new List<List<Vector2>> { innerHole };
 
-        //定义uv（对应顶点的纹理坐标，范围0-1，归一化）
-        Vector2[] uvs = new Vector2[points.Length];
+        // 2. 调用造桥算法，将洞融合进外圈
+        List<Vector2> mergedPoints = PolygonHoleMerger.Merge(outerLoop, holes);
 
-        for(int i = 0; i < points.Length; i++)
+        // 3. 准备三角剖分数据
+        Vector3[] vertices = new Vector3[mergedPoints.Count];
+        Vector2[] uvs = new Vector2[mergedPoints.Count];
+        Vector2[] points2D = new Vector2[mergedPoints.Count];
+
+        for (int i = 0; i < mergedPoints.Count; i++)
         {
-            vertices[i] = new Vector3(points[i].x, points[i].y, 0);
-            uvs[i] = new Vector2((points[i].x + 1) * 0.5f, (points[i].y + 1) * 0.5f);
+            vertices[i] = new Vector3(mergedPoints[i].x, mergedPoints[i].y, 0);
+            uvs[i] = new Vector2((mergedPoints[i].x + 2) * 0.25f, (mergedPoints[i].y + 2) * 0.25f);
+            points2D[i] = mergedPoints[i];
         }
 
-        //三角剖分
-        int[] triangles = Triangulator.Triangulate(points);
+        // 4. 耳切法生成三角形
+        int[] triangles = Triangulator.Triangulate(points2D);
 
+        // 5. 构建 Mesh
         Mesh mesh = new Mesh();
-        mesh.name = "CustomPoly";
+        mesh.name = "DonutMesh";
         mesh.vertices = vertices;
         mesh.uv = uvs;
         mesh.triangles = triangles;
-
         mesh.RecalculateNormals();
-        //赋值给组件
+
         GetComponent<MeshFilter>().mesh = mesh;
 
-        //同步Collider
-        GetComponent<PolygonCollider2D>().SetPath(0,points);
+        // 6. 设置 Collider (关键：多路径)
+        PolygonCollider2D polyCol = GetComponent<PolygonCollider2D>();
+        polyCol.pathCount = 2; // 设置有两个路径
+        polyCol.SetPath(0, outerLoop.ToArray());
+        polyCol.SetPath(1, innerHole.ToArray());
     }
 }
