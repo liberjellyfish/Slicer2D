@@ -92,6 +92,22 @@ public static class Slicer
 
         if (polyCollider == null || meshFilter == null) return;
 
+        // 1. 优先尝试从 SliceableGenerator 组件中读取“老祖宗”的包围盒
+        // 2. 如果没有（说明可能是普通物体），则计算当前的局部包围盒
+        Rect referenceRect;
+        var generator = target.GetComponent<SliceableGenerator>();
+
+        if (generator != null && generator.hasUVReference)
+        {
+            // 找到了黑匣子，直接用老祖宗的数据
+            referenceRect = generator.uvReferenceRect;
+        }
+        else
+        {
+            // 没找到（或者是第一次切且没用Generator），计算当前的作为参照
+            referenceRect = CalculateLocalBounds(polyCollider);
+        }
+
         // 局部坐标转换
         Vector2 localSliceStart = target.transform.InverseTransformPoint(worldStart);
         Vector2 localSliceEnd = target.transform.InverseTransformPoint(worldEnd);
@@ -124,7 +140,7 @@ public static class Slicer
         {
             foreach (var polyData in slicedPolygons)
             {
-                CreateSlicedObject(polyData, target, meshRenderer.sharedMaterial, originalRb);
+                CreateSlicedObject(polyData, target, meshRenderer.sharedMaterial, originalRb,referenceRect);
             }
         }
         catch (System.Exception e)
@@ -139,6 +155,25 @@ public static class Slicer
             Object.Destroy(target);
         }
     }
+
+    private static Rect CalculateLocalBounds(PolygonCollider2D col)
+    {
+        float minX = float.MaxValue, minY = float.MaxValue;
+        float maxX = float.MinValue, maxY = float.MinValue;
+
+        for (int i = 0; i < col.pathCount; i++)
+        {
+            Vector2[] path = col.GetPath(i);
+            foreach (var p in path)
+            {
+                if (p.x < minX) minX = p.x;
+                if (p.x > maxX) maxX = p.x;
+                if (p.y < minY) minY = p.y;
+                if (p.y > maxY) maxY = p.y;
+            }
+        }
+        return new Rect(minX, minY, maxX - minX, maxY - minY);
+    }//计算包围盒
 
     // =================================================================================
     //                                  核心算法逻辑
@@ -487,9 +522,10 @@ public static class Slicer
     //                                  物体生成实现
     // =================================================================================
 
-    private static void CreateSlicedObject(PolygonData data, GameObject originalTemplate, Material mat, Rigidbody2D originalRb)
+    private static void CreateSlicedObject(PolygonData data, GameObject originalTemplate, Material mat, Rigidbody2D originalRb,Rect uvRefRect)
     {
-        GameObject newObj = new GameObject(originalTemplate.name + "_Piece");
+        string baseName = originalTemplate.name.Replace("_Piece", "");
+        GameObject newObj = new GameObject(baseName + "_Piece");
         newObj.transform.position = originalTemplate.transform.position;
         newObj.transform.rotation = originalTemplate.transform.rotation;
         newObj.transform.localScale = originalTemplate.transform.localScale;
@@ -504,10 +540,24 @@ public static class Slicer
         Vector2[] uvs = new Vector2[mergedVertices.Count];
         Vector2[] vertices2D = mergedVertices.ToArray();
 
+        // 基于原物体包围盒的 UV 插值
+        // 原理：(当前点 - 最小点) / 总宽高 = 0~1 的比例
+        float width = uvRefRect.width;
+        float height = uvRefRect.height;
+        float minX = uvRefRect.x;
+        float minY = uvRefRect.y;
+
+        // 防止除以0
+        if (width < 0.0001f) width = 1;
+        if (height < 0.0001f) height = 1;
+
         for (int i = 0; i < mergedVertices.Count; i++)
         {
             vertices3D[i] = mergedVertices[i];
-            uvs[i] = new Vector2(mergedVertices[i].x, mergedVertices[i].y);
+            // 计算相对位置
+            float u = (mergedVertices[i].x - minX) / width;
+            float v = (mergedVertices[i].y - minY) / height;
+            uvs[i] = new Vector2(u,v);
         }
 
         int[] indices = Triangulator.Triangulate(vertices2D);
@@ -531,8 +581,14 @@ public static class Slicer
         {
             pc.SetPath(i + 1, data.Holes[i].ToArray());
         }
+        // 4. 传递“黑匣子”给新碎片
+        // 这样新碎片被切时，Slicer 就能读到老祖宗的数据，而不是用新碎片的数据
+        SliceableGenerator newGen = newObj.AddComponent<SliceableGenerator>();
+        newGen.hasUVReference = true;
+        newGen.uvReferenceRect = uvRefRect;
+        newGen.autoGenerateOnStart = false; // 已经是Mesh了，不需要再生成
 
-        // 4. 物理
+        // 5.. 物理
         if (originalRb != null)
         {
             Rigidbody2D newRb = newObj.AddComponent<Rigidbody2D>();
