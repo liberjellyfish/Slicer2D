@@ -1,451 +1,551 @@
 using UnityEngine;
 using System.Collections.Generic;
-using System.Runtime.CompilerServices; // ÓÃÓÚĞÔÄÜÓÅ»¯×¢½â
+using System.Linq;
+using System.Runtime.CompilerServices; // ç”¨äºå†…è”ä¼˜åŒ–
 
-/// <summary>
-/// ¾²Ì¬ÇĞ¸î¹¤¾ßÀà£º¸ºÔğ´¦Àí¼¸ºÎÇĞ¸î¡¢ÍØÆËÖØ¹¹ÓëÍø¸ñÉú³É
-/// </summary>
 public static class Slicer
 {
-    #region Êı¾İ½á¹¹¶¨Òå
+    // =================================================================================
+    //                                  é…ç½®å¸¸é‡
+    // =================================================================================
+    private const float MIN_VERT_DIST = 0.01f; // æœ€å°é¡¶ç‚¹è·ç¦»ï¼Œç”¨äºå»é‡
+    private const float MIN_VERT_DIST_SQ = MIN_VERT_DIST * MIN_VERT_DIST;
+    private const float AREA_THRESHOLD = 0.01f; // å¿½ç•¥è¿‡å°çš„ç¢ç‰‡
 
-    // Ê¹ÓÃ½á¹¹Ìå¼õÉÙGC£¬°üº¬ ID ÓÃÓÚÅÅĞòÎ¨Ò»ĞÔĞ£Ñé
-    public struct VertexData
+    // =================================================================================
+    //                                  æ•°æ®ç»“æ„
+    // =================================================================================
+
+    // ç”¨äºå›¾éå†çš„è¾¹å“ˆå¸Œé”®ï¼Œæ›¿ä»£å­—ç¬¦ä¸²ï¼Œé¿å…GC
+    private struct EdgeKey : System.IEquatable<EdgeKey>
     {
-        public Vector3 Position;    // ¾Ö²¿×ø±ê
-        public Vector2 UV;          // ÎÆÀí×ø±ê
-        public bool IsIntersection; // ÊÇ·ñÎªÇĞ¸î²úÉúµÄ½»µã
-        public int ID;              // È«¾ÖÎ¨Ò»ID (ÓÃÓÚ×ÖµäË÷Òı)
+        private readonly int x1, y1, x2, y2;
+
+        public EdgeKey(Vector2 u, Vector2 v)
+        {
+            // é‡åŒ–åæ ‡ä»¥åŒ¹é… MIN_VERT_DIST (0.01) çš„ç²¾åº¦
+            // ä¹˜ä»¥100å¹¶å–æ•´ï¼Œç›¸å½“äºä¿ç•™ä¸¤ä½å°æ•°
+            x1 = (int)(u.x * 100);
+            y1 = (int)(u.y * 100);
+            x2 = (int)(v.x * 100);
+            y2 = (int)(v.y * 100);
+        }
+
+        public bool Equals(EdgeKey other) => x1 == other.x1 && y1 == other.y1 && x2 == other.x2 && y2 == other.y2;
+
+        public override int GetHashCode()
+        {
+            // ç®€å•çš„ä½ç§»å¼‚æˆ–å“ˆå¸Œ
+            int hash = 17;
+            hash = hash * 31 + x1;
+            hash = hash * 31 + y1;
+            hash = hash * 31 + x2;
+            hash = hash * 31 + y2;
+            return hash;
+        }
     }
 
-    #endregion
+    private class PolygonData
+    {
+        public List<Vector2> OuterLoop;
+        public List<List<Vector2>> Holes;
+        public float Area;
+        public Bounds Bounds;
+        public PolygonData() { Holes = new List<List<Vector2>>(); }
 
-    #region Public API (¶ÔÍâ½Ó¿Ú)
+        public void RecalculateBounds()
+        {
+            if (OuterLoop == null || OuterLoop.Count == 0) return;
+            float minX = float.MaxValue, minY = float.MaxValue;
+            float maxX = float.MinValue, maxY = float.MinValue;
+            foreach (var p in OuterLoop)
+            {
+                if (p.x < minX) minX = p.x;
+                if (p.x > maxX) maxX = p.x;
+                if (p.y < minY) minY = p.y;
+                if (p.y > maxY) maxY = p.y;
+            }
+            Bounds = new Bounds(new Vector3((minX + maxX) / 2, (minY + maxY) / 2, 0), new Vector3(maxX - minX, maxY - minY, 1));
+        }
+    }
+
+    private struct IntersectionInfo
+    {
+        public Vector2 Point;
+        public float T;
+        public int SegmentIndex;
+    }
+
+    // =================================================================================
+    //                                  å¯¹å¤–æ¥å£
+    // =================================================================================
 
     /// <summary>
-    /// Ö´ĞĞÇĞ¸î²Ù×÷µÄÖ÷Èë¿Ú
+    /// åˆ‡å‰²æ ¸å¿ƒå…¥å£
     /// </summary>
-    /// <param name="target">±»ÇĞ¸îµÄÎïÌå</param>
-    /// <param name="worldStart">ÇĞ¸îÏßÆğµã(ÊÀ½ç×ø±ê)</param>
-    /// <param name="worldEnd">ÇĞ¸îÏßÖÕµã(ÊÀ½ç×ø±ê)</param>
     public static void Slice(GameObject target, Vector3 worldStart, Vector3 worldEnd)
     {
-        // 1. === ×ø±êÏµ×ª»» ===
-        // »º´æ Transform ¼õÉÙµ÷ÓÃ¿ªÏú
-        Transform t = target.transform;
-        Vector3 localP1 = t.InverseTransformPoint(worldStart);
-        Vector3 localP2 = t.InverseTransformPoint(worldEnd);
-
-        // ×ª»»Îª 2D ÇĞ¸îÆ½Ãæ (XY)
-        Vector2 sliceStart = new Vector2(localP1.x, localP1.y);
-        Vector2 sliceEnd = new Vector2(localP2.x, localP2.y);
-
-        // 2. === »ñÈ¡Ô­Ê¼Íø¸ñÊı¾İ ===
+        PolygonCollider2D polyCollider = target.GetComponent<PolygonCollider2D>();
         MeshFilter meshFilter = target.GetComponent<MeshFilter>();
-        if (meshFilter == null) return;
+        MeshRenderer meshRenderer = target.GetComponent<MeshRenderer>();
+        Rigidbody2D originalRb = target.GetComponent<Rigidbody2D>();
 
-        Mesh originalMesh = meshFilter.mesh;
-        // »º´æ¶¥µãºÍUVÊı×é
-        Vector3[] oldVertices = originalMesh.vertices;
-        Vector2[] oldUVs = originalMesh.uv;
+        if (polyCollider == null || meshFilter == null) return;
 
-        // ÓÅ»¯£ºÔ¤·ÖÅä List ÈİÁ¿£¬±ÜÃâÑ­»·ÖĞÆµ·±À©Èİ
-        // Ô¤¹ÀÈİÁ¿£ºÔ­¶¥µãÊı + Ô¤Áô¼¸¸ö½»µã¿Õ¼ä
-        int capacity = oldVertices.Length + 4;
-        List<VertexData> shapePoints = new List<VertexData>(capacity);
+        // å±€éƒ¨åæ ‡è½¬æ¢
+        Vector2 localSliceStart = target.transform.InverseTransformPoint(worldStart);
+        Vector2 localSliceEnd = target.transform.InverseTransformPoint(worldEnd);
 
-        int globalIDCounter = 0;
-
-        // ³õÊ¼»¯¶¥µãÊı¾İ
-        for (int i = 0; i < oldVertices.Length; i++)
+        // æå–è½®å»“
+        List<List<Vector2>> originalPaths = new List<List<Vector2>>();
+        for (int i = 0; i < polyCollider.pathCount; i++)
         {
-            shapePoints.Add(new VertexData
-            {
-                Position = oldVertices[i],
-                UV = oldUVs[i],
-                IsIntersection = false,
-                ID = globalIDCounter++
-            });
+            originalPaths.Add(new List<Vector2>(polyCollider.GetPath(i)));
         }
 
-        // 3. === ºËĞÄ¼¸ºÎÇĞ¸î (Sutherland-Hodgman) ===
-        // Ô¤·ÖÅä½á¹ûÁĞ±í
-        List<VertexData> posSide = new List<VertexData>(capacity);
-        List<VertexData> negSide = new List<VertexData>(capacity);
-
-        PerformSutherlandHodgman(shapePoints, sliceStart, sliceEnd, ref globalIDCounter, posSide, negSide);
-
-        // Ğ£ÑéÓĞĞ§ĞÔ
-        if (posSide.Count < 3 || negSide.Count < 3) return;
-
-        // 4. === ÍØÆËÖØ¹¹ÓëÎïÌåÉú³É ===
-        Material originalMat = target.GetComponent<MeshRenderer>().sharedMaterial;
-
-        // ´«ÈëÇĞÏßĞÅÏ¢ÓÃÓÚÍØÆËÅÅĞò
-        CreateObjectsFromTopology(target, posSide, originalMat, "PositiveMesh", sliceStart, sliceEnd);
-        CreateObjectsFromTopology(target, negSide, originalMat, "NegativeMesh", sliceStart, sliceEnd);
-
-        // Ïú»ÙÔ­ÎïÌå
-        GameObject.Destroy(target);
-    }
-
-    #endregion
-
-    #region Core Logic (ºËĞÄÇĞ¸îÂß¼­)
-
-    /// <summary>
-    /// Ö´ĞĞ Sutherland-Hodgman ¶à±ßĞÎ²Ã¼ôËã·¨
-    /// </summary>
-    private static void PerformSutherlandHodgman(
-        List<VertexData> inputPoints,
-        Vector2 lineStart,
-        Vector2 lineEnd,
-        ref int idCounter,
-        List<VertexData> posSide,
-        List<VertexData> negSide)
-    {
-        int count = inputPoints.Count;
-        for (int i = 0; i < count; i++)
+        // æ ¸å¿ƒè®¡ç®—
+        List<PolygonData> slicedPolygons = null;
+        try
         {
-            VertexData v1 = inputPoints[i];
-            VertexData v2 = inputPoints[(i + 1) % count]; // ±Õ»·´¦Àí
+            slicedPolygons = CalculateSlicedPolygons(originalPaths, localSliceStart, localSliceEnd);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"[Slicer] ç®—æ³•é”™è¯¯: {e.Message}");
+            return;
+        }
 
-            bool v1Side = IsPointOnPositiveSide(lineStart, lineEnd, v1.Position);
-            bool v2Side = IsPointOnPositiveSide(lineStart, lineEnd, v2.Position);
+        // éªŒè¯ç»“æœ
+        if (slicedPolygons == null || slicedPolygons.Count == 0) return;
 
-            if (v1Side == v2Side)
+        // ç”Ÿæˆç‰©ä½“
+        bool success = true;
+        try
+        {
+            foreach (var polyData in slicedPolygons)
             {
-                // Çé¿öA£ºÁ½µãÍ¬²à -> ±£Áô v1
-                if (v1Side) posSide.Add(v1);
-                else negSide.Add(v1);
+                CreateSlicedObject(polyData, target, meshRenderer.sharedMaterial, originalRb);
             }
-            else
-            {
-                // Çé¿öB£ºÁ½µãÒì²à -> Á¬Ïß±»ÇĞ¶Ï
-                // 1. ÏÈ±£Áô v1
-                if (v1Side) posSide.Add(v1);
-                else negSide.Add(v1);
+        }
+        catch (System.Exception e)
+        {
+            success = false;
+            Debug.LogError($"[Slicer] Meshç”Ÿæˆé”™è¯¯: {e.Message}");
+        }
 
-                // 2. ¼ÆËã²¢Éú³É½»µã
-                float t = GetIntersectionT(lineStart, lineEnd, v1.Position, v2.Position);
-
-                VertexData intersectionPoint = new VertexData();
-                intersectionPoint.Position = Vector3.Lerp(v1.Position, v2.Position, t);
-                intersectionPoint.UV = Vector2.Lerp(v1.UV, v2.UV, t);
-                intersectionPoint.IsIntersection = true;
-                intersectionPoint.ID = idCounter++; // ·ÖÅäÎ¨Ò»ID
-
-                // 3. ½»µãÍ¬Ê±¼ÓÈëÁ½²à
-                posSide.Add(intersectionPoint);
-                negSide.Add(intersectionPoint);
-            }
+        // ä»…åœ¨æˆåŠŸæ—¶é”€æ¯åŸç‰©ä½“
+        if (success)
+        {
+            Object.Destroy(target);
         }
     }
 
-    /// <summary>
-    /// ´¦ÀíÇĞ¸îºóµÄÊı¾İ£¬Éú³ÉÓÎÏ·ÎïÌå
-    /// </summary>
-    private static void CreateObjectsFromTopology(
-        GameObject original,
-        List<VertexData> rawPoints,
-        Material mat,
-        string baseName,
-        Vector2 lineStart,
-        Vector2 lineEnd)
+    // =================================================================================
+    //                                  æ ¸å¿ƒç®—æ³•é€»è¾‘
+    // =================================================================================
+
+    private static List<PolygonData> CalculateSlicedPolygons(List<List<Vector2>> paths, Vector2 start, Vector2 end)
     {
-        // 1. ÍØÆË·ÖÀë£º¸ù¾İ½»µãÅÅĞò¼ô¶Ï¡°·Ç·¨¿çÔ½¡±µÄ±ß
-        List<List<VertexData>> polygons = SplitPolygonBySortedIntersections(rawPoints, lineStart, lineEnd);
+        Dictionary<Vector2, List<Vector2>> graph = new Dictionary<Vector2, List<Vector2>>();
+        List<Vector2> cutIntersections = new List<Vector2>();
 
-        int counter = 0;
-        foreach (var polyPoints in polygons)
+        // --- Phase 1: æ„å»ºæ‹“æ‰‘å›¾ ---
+        foreach (var path in paths)
         {
-            // ¹ıÂËÎŞĞ§ËéÆ¬
-            if (polyPoints.Count < 3) continue;
-
-            // 2. Éú³ÉÁÙÊ±´óÍø¸ñ
-            Mesh bigMesh = GenerateMesh(polyPoints);
-
-            // 3. ¶ş´Î¼ì²é£ºÎïÀíÀëµº·ÖÀë (´¦ÀíÄÇÖÖÃ»ÓĞ½»µãµ«ÎïÀí¶Ï¿ªµÄÇé¿ö)
-            List<Mesh> separatedMeshes = MeshSeparator.Separate(bigMesh);
-
-            // 4. ÊµÀı»¯×îÖÕÎïÌå
-            foreach (var subMesh in separatedMeshes)
+            // 1.1 è®¡ç®—äº¤ç‚¹
+            List<IntersectionInfo> hits = new List<IntersectionInfo>();
+            for (int i = 0; i < path.Count; i++)
             {
-                InstantiateSplitObject(original, subMesh, mat, $"{baseName}_{counter++}");
-            }
-        }
-    }
+                Vector2 p1 = path[i];
+                Vector2 p2 = path[(i + 1) % path.Count];
 
-    #endregion
-
-    #region Topology (ÍØÆËÅÅĞòÓëÖØ¹¹)
-
-    /// <summary>
-    /// ¡¾ºËĞÄËã·¨¡¿»ùÓÚ½»µã Rank ÅÅĞòµÄÍØÆË·ÖÀë
-    /// </summary>
-    private static List<List<VertexData>> SplitPolygonBySortedIntersections(
-        List<VertexData> points,
-        Vector2 lineStart,
-        Vector2 lineEnd)
-    {
-        // Step 1: ÌáÈ¡½»µã
-        List<VertexData> intersections = new List<VertexData>();
-        for (int i = 0; i < points.Count; i++)
-        {
-            if (points[i].IsIntersection) intersections.Add(points[i]);
-        }
-
-        // Èİ´í£º±ØĞë³É¶Ô³öÏÖ
-        if (intersections.Count % 2 != 0)
-            return new List<List<VertexData>>() { points };
-
-        // Step 2: ¶Ô½»µãÅÅĞò (Í¶Ó°µ½ÇĞ¸îÏßÉÏ)
-        Vector2 lineDir = (lineEnd - lineStart).normalized;
-        intersections.Sort((a, b) => {
-            float distA = Vector2.Dot(new Vector2(a.Position.x, a.Position.y), lineDir);
-            float distB = Vector2.Dot(new Vector2(b.Position.x, b.Position.y), lineDir);
-            return distA.CompareTo(distB);
-        });
-
-        // Step 3: ½¨Á¢ Rank Ë÷Òı±í (ID -> Rank)
-        Dictionary<int, int> intersectionRank = new Dictionary<int, int>(intersections.Count);
-        for (int i = 0; i < intersections.Count; i++)
-        {
-            intersectionRank[intersections[i].ID] = i;
-        }
-
-        // Step 4: Ñ²ÂßÒ»È¦£¬¸ù¾İ Rank ÅĞ¶¨ÊÇ·ñ¼ô¶Ï
-        List<List<VertexData>> result = new List<List<VertexData>>();
-        List<VertexData> currentChain = new List<VertexData>(points.Count);
-
-        int n = points.Count;
-        bool lastEdgeWasCut = false;
-
-        for (int i = 0; i < n; i++)
-        {
-            VertexData p1 = points[i];
-            VertexData p2 = points[(i + 1) % n];
-
-            currentChain.Add(p1);
-
-            // Èç¹ûÕâÌõ±ßµÄÁ½¶Ë¶¼ÊÇ½»µã£¬ËüÊÇÇ±ÔÚµÄ¡°ÇÅ¡±
-            if (p1.IsIntersection && p2.IsIntersection)
-            {
-                if (intersectionRank.TryGetValue(p1.ID, out int rank1) &&
-                    intersectionRank.TryGetValue(p2.ID, out int rank2))
+                if (GetLineIntersection(p1, p2, start, end, out Vector2 intersection, out float t))
                 {
-                    int rankDiff = Mathf.Abs(rank1 - rank2);
-                    int minRank = Mathf.Min(rank1, rank2);
+                    hits.Add(new IntersectionInfo { Point = intersection, T = t, SegmentIndex = i });
+                }
+            }
 
-                    // === ¼ô¶ÏÅĞ¾İ ===
-                    // 1. RankDiff != 1: ¿ç¼¶Á¬½Ó£¨Èç 0 Á¬µ½ 3£©£¬±Ø¶Ï
-                    // 2. MinRank ÊÇÆæÊı: Î»ÓÚ (Out->In) Çø¼ä£¬ÊÇ¿ÕÆø£¬±Ø¶Ï
-                    if (rankDiff != 1 || minRank % 2 != 0)
+            // 1.2 æ’åºäº¤ç‚¹
+            hits.Sort((a, b) => {
+                if (a.SegmentIndex != b.SegmentIndex) return a.SegmentIndex.CompareTo(b.SegmentIndex);
+                return Vector2.SqrMagnitude(a.Point - path[a.SegmentIndex]).CompareTo(Vector2.SqrMagnitude(b.Point - path[b.SegmentIndex]));
+            });
+
+            // 1.3 æ’å…¥äº¤ç‚¹å¹¶é‡å»ºè½®å»“
+            List<Vector2> newPathVertices = new List<Vector2>();
+            int hitIndex = 0;
+
+            for (int i = 0; i < path.Count; i++)
+            {
+                Vector2 currentVert = path[i];
+                // é¡¶ç‚¹å»é‡
+                if (newPathVertices.Count == 0 || Vector2.SqrMagnitude(newPathVertices[newPathVertices.Count - 1] - currentVert) > MIN_VERT_DIST_SQ)
+                {
+                    newPathVertices.Add(currentVert);
+                }
+
+                while (hitIndex < hits.Count && hits[hitIndex].SegmentIndex == i)
+                {
+                    Vector2 p = hits[hitIndex].Point;
+                    // äº¤ç‚¹å»é‡
+                    if (Vector2.SqrMagnitude(newPathVertices[newPathVertices.Count - 1] - p) > MIN_VERT_DIST_SQ)
                     {
-                        // ¼ô¶Ï£¡´ò°üµ±Ç°Á´Ìõ
-                        if (currentChain.Count >= 3)
-                        {
-                            result.Add(new List<VertexData>(currentChain));
-                        }
-                        // ¿ªÆôĞÂÁ´Ìõ
-                        currentChain = new List<VertexData>(points.Count);
-                        if (i == n - 1) lastEdgeWasCut = true;
+                        newPathVertices.Add(p);
+                        cutIntersections.Add(p);
                     }
+                    hitIndex++;
+                }
+            }
+            // ç¯è·¯é¦–å°¾å»é‡
+            if (newPathVertices.Count > 1 && Vector2.SqrMagnitude(newPathVertices[0] - newPathVertices[newPathVertices.Count - 1]) < MIN_VERT_DIST_SQ)
+                newPathVertices.RemoveAt(newPathVertices.Count - 1);
+
+            // 1.4 å°†è½®å»“è¾¹åŠ å…¥å›¾
+            for (int i = 0; i < newPathVertices.Count; i++)
+            {
+                AddEdge(graph, newPathVertices[i], newPathVertices[(i + 1) % newPathVertices.Count]);
+            }
+        }
+
+        // --- Phase 2: å¤„ç†åˆ‡å‰²ç¼ ---
+        // å…¨å±€äº¤ç‚¹å»é‡
+        for (int i = cutIntersections.Count - 1; i >= 0; i--)
+        {
+            for (int j = 0; j < i; j++)
+            {
+                if (Vector2.SqrMagnitude(cutIntersections[i] - cutIntersections[j]) < MIN_VERT_DIST_SQ)
+                {
+                    cutIntersections.RemoveAt(i);
+                    break;
                 }
             }
         }
 
-        // Step 5: Ê×Î²±ÕºÏÂß¼­ (ĞŞ¸´»·×´ÎïÌå±»ÎóÇĞ)
-        if (currentChain.Count > 0)
+        if (cutIntersections.Count < 2) return null;
+
+        // æŒ‰åœ¨åˆ‡å‰²çº¿ä¸Šçš„ä½ç½®æ’åº
+        cutIntersections.Sort((a, b) => {
+            float distA = Vector2.Dot(a - start, end - start);
+            float distB = Vector2.Dot(b - start, end - start);
+            return distA.CompareTo(distB);
+        });
+
+        // å¥‡å¶è¿æ¥ (0-1, 2-3)
+        int validCount = (cutIntersections.Count % 2 == 0) ? cutIntersections.Count : cutIntersections.Count - 1;
+        for (int i = 0; i < validCount; i += 2)
         {
-            // Èç¹û×îºóÒ»Ìõ±ßÊÇÊµĞÄµÄ£¨Ã»¶Ï£©£¬ËµÃ÷ËüÊÇµÚÒ»¿éËéÆ¬µÄÇ°°ë²¿·Ö
-            if (!lastEdgeWasCut && result.Count > 0)
+            Vector2 pA = cutIntersections[i];
+            Vector2 pB = cutIntersections[i + 1];
+            if (Vector2.SqrMagnitude(pA - pB) > MIN_VERT_DIST_SQ)
             {
-                result[0].InsertRange(0, currentChain);
-            }
-            else if (currentChain.Count >= 3)
-            {
-                result.Add(currentChain);
+                AddEdge(graph, pA, pB);
+                AddEdge(graph, pB, pA);
             }
         }
 
-        return result;
+        // --- Phase 3: æå–å›è·¯ä¸å±‚çº§åˆ†æ ---
+        List<List<Vector2>> allLoops = ExtractLoops(graph);
+        List<PolygonData> solids = new List<PolygonData>();
+        List<List<Vector2>> holes = new List<List<Vector2>>();
+
+        foreach (var rawLoop in allLoops)
+        {
+            List<Vector2> loop = SimplifyPath(rawLoop);
+            float area = SignedArea(loop);
+            if (Mathf.Abs(area) < AREA_THRESHOLD) continue;
+
+            // CCW (Area > 0) -> Solid, CW (Area < 0) -> Hole
+            if (area > 0)
+            {
+                PolygonData poly = new PolygonData();
+                poly.OuterLoop = loop;
+                poly.Area = area;
+                poly.RecalculateBounds();
+                solids.Add(poly);
+            }
+            else
+            {
+                holes.Add(loop);
+            }
+        }
+
+        // --- Phase 4: å½’å±æƒåˆ†é… ---
+        foreach (var hole in holes)
+        {
+            PolygonData bestParent = null;
+            float minParentArea = float.MaxValue;
+            Vector2 centroid = GetCentroid(hole);
+
+            foreach (var solid in solids)
+            {
+                // Bounds Check
+                if (!solid.Bounds.Contains(new Vector3(centroid.x, centroid.y, 0))) continue;
+                // Area Check
+                if (solid.Area < Mathf.Abs(SignedArea(hole))) continue;
+                // Point-in-Polygon Check
+                if (solid.Area < minParentArea && IsPointInPolygon(centroid, solid.OuterLoop))
+                {
+                    bestParent = solid;
+                    minParentArea = solid.Area;
+                }
+            }
+
+            if (bestParent != null)
+            {
+                bestParent.Holes.Add(hole);
+            }
+            // å­¤å„¿å­”æ´ç›´æ¥ä¸¢å¼ƒ
+        }
+
+        return solids;
     }
 
-    #endregion
+    // =================================================================================
+    //                                  å›¾è®ºç®—æ³•
+    // =================================================================================
 
-    #region Mesh Generation (Íø¸ñÓë¶ÔÏóÉú³É)
-
-    private static void InstantiateSplitObject(GameObject original, Mesh mesh, Material mat, string name)
+    private static void AddEdge(Dictionary<Vector2, List<Vector2>> graph, Vector2 u, Vector2 v)
     {
-        GameObject newObj = new GameObject(name);
-        Transform t = newObj.transform;
-        Transform originalT = original.transform;
+        if (Vector2.SqrMagnitude(u - v) < 1e-6f) return;
+        if (!graph.ContainsKey(u)) graph[u] = new List<Vector2>();
 
-        // ¼Ì³Ğ±ä»»
-        t.SetPositionAndRotation(originalT.position, originalT.rotation);
-        t.localScale = originalT.localScale;
-        newObj.layer = original.layer;
-
-        // Ìí¼ÓäÖÈ¾×é¼ş
-        newObj.AddComponent<MeshFilter>().mesh = mesh;
-        newObj.AddComponent<MeshRenderer>().material = mat;
-
-        // Éú³ÉÅö×²Ìå (¹Ø¼ü£º±ßÔµÌáÈ¡)
-        PolygonCollider2D collider = newObj.AddComponent<PolygonCollider2D>();
-        Vector2[] boundary = GetBoundaryPath(mesh);
-
-        if (boundary != null && boundary.Length >= 3)
+        // é¿å…é‡å¤è¾¹
+        bool exists = false;
+        foreach (var neighbor in graph[u])
         {
-            collider.SetPath(0, boundary);
+            if (Vector2.SqrMagnitude(neighbor - v) < 1e-6f) { exists = true; break; }
         }
-        else
-        {
-            // ¶µµ×·½°¸£ºÊ¹ÓÃÍ¹°ü»òÖ±½Óµã¼¯
-            Vector2[] fallback = new Vector2[mesh.vertexCount];
-            for (int k = 0; k < mesh.vertexCount; k++)
-                fallback[k] = mesh.vertices[k]; // Vector3ÒşÊ½×ªVector2
-            collider.SetPath(0, fallback);
-        }
-
-        // ¼Ì³ĞÎïÀíËÙ¶È
-        Rigidbody2D newRb = newObj.AddComponent<Rigidbody2D>();
-        Rigidbody2D oldRb = original.GetComponent<Rigidbody2D>();
-        if (oldRb != null)
-        {
-            newRb.linearVelocity = oldRb.linearVelocity;
-            newRb.angularVelocity = oldRb.angularVelocity;
-        }
+        if (!exists) graph[u].Add(v);
     }
 
-    private static Mesh GenerateMesh(List<VertexData> points)
+    private static List<List<Vector2>> ExtractLoops(Dictionary<Vector2, List<Vector2>> graph)
     {
-        int count = points.Count;
-        Vector3[] vertices = new Vector3[count];
-        Vector2[] uvs = new Vector2[count];
-        Vector2[] points2D = new Vector2[count];
+        List<List<Vector2>> loops = new List<List<Vector2>>();
+        HashSet<EdgeKey> visitedEdges = new HashSet<EdgeKey>(); // ä½¿ç”¨ Struct æ›¿ä»£ Stringï¼Œ0 GC
 
+        foreach (var startNode in graph.Keys)
+        {
+            var neighbors = new List<Vector2>(graph[startNode]);
+            foreach (var nextNode in neighbors)
+            {
+                EdgeKey edgeKey = new EdgeKey(startNode, nextNode);
+                if (visitedEdges.Contains(edgeKey)) continue;
+
+                List<Vector2> currentLoop = new List<Vector2>();
+                Vector2 curr = startNode;
+                Vector2 next = nextNode;
+                currentLoop.Add(curr);
+
+                int watchdog = 0;
+                bool loopClosed = false;
+
+                while (watchdog++ < 3000)
+                {
+                    visitedEdges.Add(new EdgeKey(curr, next));
+                    currentLoop.Add(next);
+
+                    if (Vector2.SqrMagnitude(next - startNode) < MIN_VERT_DIST_SQ)
+                    {
+                        loopClosed = true;
+                        break;
+                    }
+
+                    Vector2 prev = curr;
+                    curr = next;
+
+                    if (!graph.ContainsKey(curr) || graph[curr].Count == 0) break;
+                    next = GetLeftMostNeighbor(prev, curr, graph[curr]);
+                    if (next == Vector2.zero) break;
+                }
+
+                if (loopClosed && currentLoop.Count > 2)
+                {
+                    currentLoop.RemoveAt(currentLoop.Count - 1);
+                    loops.Add(currentLoop);
+                }
+            }
+        }
+        return loops;
+    }
+
+    // =================================================================================
+    //                                  å‡ ä½•è®¡ç®— (å†…è”ä¼˜åŒ–)
+    // =================================================================================
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector2 GetLeftMostNeighbor(Vector2 prev, Vector2 curr, List<Vector2> neighbors)
+    {
+        Vector2 incomingDir = (curr - prev).normalized;
+        if (float.IsNaN(incomingDir.x)) return Vector2.zero;
+
+        float bestAngle = -1.0f;
+        Vector2 bestNext = Vector2.zero;
+        Vector2 backDir = -incomingDir;
+
+        int count = neighbors.Count;
         for (int i = 0; i < count; i++)
         {
-            vertices[i] = points[i].Position;
-            uvs[i] = points[i].UV;
-            points2D[i] = new Vector2(points[i].Position.x, points[i].Position.y);
+            Vector2 neighbor = neighbors[i];
+            // é™¤éæ˜¯æ­»èƒ¡åŒï¼Œå¦åˆ™ä¸èµ°å›å¤´è·¯
+            if (Vector2.SqrMagnitude(neighbor - prev) < MIN_VERT_DIST_SQ && count > 1) continue;
+
+            Vector2 outgoingDir = (neighbor - curr).normalized;
+            if (float.IsNaN(outgoingDir.x)) continue;
+
+            float angle = Vector2.SignedAngle(backDir, outgoingDir);
+            if (angle < 0) angle += 360f;
+
+            // æ‰¾æœ€å¤§è§’ (å·¦è½¬)
+            if (angle > bestAngle)
+            {
+                bestAngle = angle;
+                bestNext = neighbor;
+            }
         }
 
-        // µ÷ÓÃ¶úÇĞ·¨
-        int[] triangles = Triangulator.Triangulate(points2D);
+        if (bestNext == Vector2.zero && count > 0) return neighbors[0];
+        return bestNext;
+    }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool GetLineIntersection(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4, out Vector2 intersection, out float t)
+    {
+        intersection = Vector2.zero;
+        t = 0;
+        float d = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x);
+        if (Mathf.Abs(d) < 1e-6f) return false;
+
+        float u = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / d;
+        float v = ((p3.x - p1.x) * (p2.y - p1.y) - (p3.y - p1.y) * (p2.x - p1.x)) / d;
+
+        // ç¨å¾®æ”¾å®½ä¸€ç‚¹å®¹å·®ï¼Œæ•æ‰é¡¶ç‚¹ç›¸äº¤
+        if (u >= -1e-4f && u <= 1.0001f && v >= -1e-4f && v <= 1.0001f)
+        {
+            t = Mathf.Clamp01(v);
+            intersection = p1 + Mathf.Clamp01(u) * (p2 - p1);
+            return true;
+        }
+        return false;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float SignedArea(List<Vector2> points)
+    {
+        float area = 0;
+        int count = points.Count;
+        for (int i = 0; i < count; i++)
+        {
+            Vector2 p1 = points[i];
+            Vector2 p2 = points[(i + 1) % count];
+            area += (p1.x * p2.y) - (p2.x * p1.y);
+        }
+        return area / 2.0f;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector2 GetCentroid(List<Vector2> points)
+    {
+        if (points == null || points.Count == 0) return Vector2.zero;
+        Vector2 sum = Vector2.zero;
+        foreach (var p in points) sum += p;
+        return sum / points.Count;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsPointInPolygon(Vector2 p, List<Vector2> polygon)
+    {
+        bool inside = false;
+        int count = polygon.Count;
+        for (int i = 0, j = count - 1; i < count; j = i++)
+        {
+            if (((polygon[i].y > p.y) != (polygon[j].y > p.y)) &&
+                (p.x < (polygon[j].x - polygon[i].x) * (p.y - polygon[i].y) / (polygon[j].y - polygon[i].y) + polygon[i].x))
+            {
+                inside = !inside;
+            }
+        }
+        return inside;
+    }
+
+    // ç®€åŒ–è·¯å¾„ï¼Œç§»é™¤å…±çº¿ç‚¹å’Œè¿‡è¿‘ç‚¹
+    private static List<Vector2> SimplifyPath(List<Vector2> path)
+    {
+        if (path.Count < 3) return path;
+        List<Vector2> simplified = new List<Vector2>();
+        simplified.Add(path[0]);
+        for (int i = 1; i < path.Count; i++)
+        {
+            if (Vector2.SqrMagnitude(path[i] - simplified[simplified.Count - 1]) > MIN_VERT_DIST_SQ)
+                simplified.Add(path[i]);
+        }
+        if (simplified.Count > 2 && Vector2.SqrMagnitude(simplified[0] - simplified[simplified.Count - 1]) < MIN_VERT_DIST_SQ)
+            simplified.RemoveAt(simplified.Count - 1);
+        return simplified;
+    }
+
+    // =================================================================================
+    //                                  ç‰©ä½“ç”Ÿæˆå®ç°
+    // =================================================================================
+
+    private static void CreateSlicedObject(PolygonData data, GameObject originalTemplate, Material mat, Rigidbody2D originalRb)
+    {
+        GameObject newObj = new GameObject(originalTemplate.name + "_Piece");
+        newObj.transform.position = originalTemplate.transform.position;
+        newObj.transform.rotation = originalTemplate.transform.rotation;
+        newObj.transform.localScale = originalTemplate.transform.localScale;
+        newObj.layer = originalTemplate.layer;
+        newObj.tag = originalTemplate.tag;
+
+        // 1. åˆå¹¶
+        List<Vector2> mergedVertices = PolygonHoleMerger.Merge(data.OuterLoop, data.Holes);
+
+        // 2. Mesh
+        Vector3[] vertices3D = new Vector3[mergedVertices.Count];
+        Vector2[] uvs = new Vector2[mergedVertices.Count];
+        Vector2[] vertices2D = mergedVertices.ToArray();
+
+        for (int i = 0; i < mergedVertices.Count; i++)
+        {
+            vertices3D[i] = mergedVertices[i];
+            uvs[i] = new Vector2(mergedVertices[i].x, mergedVertices[i].y);
+        }
+
+        int[] indices = Triangulator.Triangulate(vertices2D);
         Mesh mesh = new Mesh();
-        mesh.vertices = vertices;
+        mesh.vertices = vertices3D;
         mesh.uv = uvs;
-        mesh.triangles = triangles;
-
+        mesh.triangles = indices;
         mesh.RecalculateNormals();
         mesh.RecalculateBounds();
-        return mesh;
-    }
 
-    /// <summary>
-    /// ÌáÈ¡ Mesh µÄÎ¨Ò»ÍâÂÖÀªÂ·¾¶
-    /// </summary>
-    private static Vector2[] GetBoundaryPath(Mesh mesh)
-    {
-        int[] tris = mesh.triangles;
-        Vector3[] verts = mesh.vertices;
+        MeshFilter mf = newObj.AddComponent<MeshFilter>();
+        mf.mesh = mesh;
+        MeshRenderer mr = newObj.AddComponent<MeshRenderer>();
+        mr.material = mat;
 
-        // ÓÅ»¯£ºÖ¸¶¨ Dictionary ÈİÁ¿
-        int estimatedEdges = tris.Length;
-        Dictionary<long, int> edgeCounts = new Dictionary<long, int>(estimatedEdges);
-        Dictionary<int, int> edgeGraph = new Dictionary<int, int>(estimatedEdges / 3);
-
-        // 1. Í³¼Æ±ßÆµ´Î
-        for (int i = 0; i < tris.Length; i += 3)
+        // 3. Collider
+        PolygonCollider2D pc = newObj.AddComponent<PolygonCollider2D>();
+        pc.pathCount = 1 + data.Holes.Count;
+        pc.SetPath(0, data.OuterLoop.ToArray());
+        for (int i = 0; i < data.Holes.Count; i++)
         {
-            AddEdge(edgeCounts, tris[i], tris[i + 1]);
-            AddEdge(edgeCounts, tris[i + 1], tris[i + 2]);
-            AddEdge(edgeCounts, tris[i + 2], tris[i]);
+            pc.SetPath(i + 1, data.Holes[i].ToArray());
         }
 
-        // 2. É¸Ñ¡±ß½ç±ß (Æµ´Î=1)
-        for (int i = 0; i < tris.Length; i += 3)
+        // 4. ç‰©ç†
+        if (originalRb != null)
         {
-            ProcessBoundaryEdge(edgeCounts, edgeGraph, tris[i], tris[i + 1]);
-            ProcessBoundaryEdge(edgeCounts, edgeGraph, tris[i + 1], tris[i + 2]);
-            ProcessBoundaryEdge(edgeCounts, edgeGraph, tris[i + 2], tris[i]);
-        }
-
-        if (edgeGraph.Count == 0) return null;
-
-        // 3. ¹¹½¨±ÕºÏ»ØÂ·
-        List<Vector2> path = new List<Vector2>(verts.Length);
-        int startNode = 0;
-        foreach (var key in edgeGraph.Keys) { startNode = key; break; }
-
-        int current = startNode;
-        int safety = 0;
-        int maxLoop = verts.Length * 2; // °²È«ÏŞÖÆ
-
-        while (safety++ < maxLoop)
-        {
-            path.Add(verts[current]); // Vector3 -> Vector2
-
-            if (edgeGraph.TryGetValue(current, out int nextNode))
-            {
-                current = nextNode;
-            }
-            else break;
-
-            if (current == startNode) break;
-        }
-
-        return path.ToArray();
-    }
-
-    // ÄÚÁªÓÅ»¯£º¸ßÆµµ÷ÓÃµÄ Helper
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void AddEdge(Dictionary<long, int> counts, int a, int b)
-    {
-        long key = a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a;
-        if (counts.ContainsKey(key)) counts[key]++; else counts[key] = 1;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void ProcessBoundaryEdge(Dictionary<long, int> counts, Dictionary<int, int> graph, int a, int b)
-    {
-        long key = a < b ? ((long)a << 32) | (uint)b : ((long)b << 32) | (uint)a;
-        if (counts[key] == 1)
-        {
-            if (!graph.ContainsKey(a)) graph[a] = b;
+            Rigidbody2D newRb = newObj.AddComponent<Rigidbody2D>();
+            newRb.mass = originalRb.mass * (data.Area / 10f);
+            newRb.useAutoMass = true;
+            newRb.linearDamping = originalRb.linearDamping;
+            newRb.angularDamping = originalRb.angularDamping;
+            newRb.gravityScale = originalRb.gravityScale;
+            newRb.collisionDetectionMode = originalRb.collisionDetectionMode;
+            newRb.interpolation = originalRb.interpolation;
+            newRb.sharedMaterial = originalRb.sharedMaterial;
+            newRb.linearVelocity = originalRb.linearVelocity;
+            newRb.angularVelocity = originalRb.angularVelocity;
         }
     }
-
-    #endregion
-
-    #region Math & Geometry (¸ßĞÔÄÜÊıÑ§¼ÆËã)
-
-    // ÄÚÁªÓÅ»¯
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool IsPointOnPositiveSide(Vector2 lineStart, Vector2 lineEnd, Vector3 p)
-    {
-        // ¶şÎ¬²æ»ı£º(LineVec) x (PointVec)
-        // Õ¹¿ª: (x2-x1)*(py-y1) - (y2-y1)*(px-x1)
-        return ((lineEnd.x - lineStart.x) * (p.y - lineStart.y) - (lineEnd.y - lineStart.y) * (p.x - lineStart.x)) > 0;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static float GetIntersectionT(Vector2 lineStart, Vector2 lineEnd, Vector2 segStart, Vector2 segEnd)
-    {
-        float d1 = SignedDistance(lineStart, lineEnd, segStart);
-        float d2 = SignedDistance(lineStart, lineEnd, segEnd);
-        // Ê¹ÓÃ Abs ±ÜÃâ·ûºÅÅĞ¶Ï£¬Ìá¸ßÖ¸ÁîÁ÷Ë®ÏßĞ§ÂÊ
-        return Mathf.Abs(d1) / (Mathf.Abs(d1) + Mathf.Abs(d2));
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static float SignedDistance(Vector2 lineStart, Vector2 lineEnd, Vector2 p)
-    {
-        return (lineEnd.x - lineStart.x) * (p.y - lineStart.y) - (lineEnd.y - lineStart.y) * (p.x - lineStart.x);
-    }
-
-    #endregion
 }
