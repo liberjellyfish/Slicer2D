@@ -112,6 +112,24 @@ public static class Slicer
         Vector2 localSliceStart = target.transform.InverseTransformPoint(worldStart);
         Vector2 localSliceEnd = target.transform.InverseTransformPoint(worldEnd);
 
+
+        Vector2 cutDirection = (localSliceEnd - localSliceStart).normalized;
+
+        // 如果点重合导致方向为0，直接退出
+        if (cutDirection == Vector2.zero) return;
+
+        // 计算延长长度：取包围盒宽高的最大值，或者对角线长度，再乘个系数确保安全
+        // referenceRect 是局部坐标下的包围盒（老祖宗的，或者当前的）
+        // 如果物体被切得很小，referenceRect 依然是老祖宗的，这没问题，只会延长得更多一点，更安全
+        float extensionLength = Mathf.Max(referenceRect.width, referenceRect.height) * 1.5f + 1.0f;
+
+        // 向两端延伸
+        Vector2 extendedStart = localSliceStart - cutDirection * extensionLength;
+        Vector2 extendedEnd = localSliceEnd + cutDirection * extensionLength;
+
+        localSliceStart = extendedStart;
+        localSliceEnd = extendedEnd;
+
         // 提取轮廓
         List<List<Vector2>> originalPaths = new List<List<Vector2>>();
         for (int i = 0; i < polyCollider.pathCount; i++)
