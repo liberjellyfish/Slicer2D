@@ -92,10 +92,17 @@ public class MouseSlicer : MonoBehaviour
         int hitCount = Physics2D.Linecast(slicerStart, slicerEnd, contactFilter,hitResults);
 
         Debug.Log($"[MouseSlicer] 这一刀切到了 {hitCount} 个物体");
+
+        System.Collections.Generic.HashSet<GameObject> processedObjects = new System.Collections.Generic.HashSet<GameObject>();
+        
         //实施切割算法
-        for(int i=0;i<hitCount;i++)
+        for (int i=0;i<hitCount;i++)
         {
             GameObject target = hitResults[i].collider.gameObject;
+
+            // 如果这个物体已经被处理过（或者已经被销毁），跳过
+            if (target == null || processedObjects.Contains(target)) continue;
+            processedObjects.Add(target);
 
             Slicer.Slice(target,slicerStart, slicerEnd);
         }
