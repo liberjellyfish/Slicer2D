@@ -16,6 +16,11 @@ public class MouseSlicer : MonoBehaviour
 
     public LayerMask sliceableLayer;//层级遮罩，只检测此层级
 
+    //预分配射线检测结果数组。避免GC
+    private RaycastHit2D[] hitResults = new RaycastHit2D[16];
+
+    private ContactFilter2D contactFilter;
+
     void Start()
     {
         lineVisualizer = GetComponent<LineRenderer>();
@@ -82,13 +87,15 @@ public class MouseSlicer : MonoBehaviour
         }
         Debug.Log($"[切割指令] Start: {slicerStart} -> End: {slicerEnd}");
 
-        RaycastHit2D[] hits = Physics2D.LinecastAll(slicerStart, slicerEnd, sliceableLayer);
+        contactFilter.SetLayerMask(sliceableLayer);
 
-        Debug.Log($"[MouseSlicer] 这一刀切到了 {hits.Length} 个物体");
+        int hitCount = Physics2D.Linecast(slicerStart, slicerEnd, contactFilter,hitResults);
+
+        Debug.Log($"[MouseSlicer] 这一刀切到了 {hitCount} 个物体");
         //实施切割算法
-        foreach (RaycastHit2D hit in hits )
+        for(int i=0;i<hitCount;i++)
         {
-            GameObject target = hit.collider.gameObject;
+            GameObject target = hitResults[i].collider.gameObject;
 
             Slicer.Slice(target,slicerStart, slicerEnd);
         }
