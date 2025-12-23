@@ -1,10 +1,8 @@
 using UnityEngine;
 using System.Collections.Generic;
-using System;
 
 public class PolygonHoleMerger
 {
-    // 简单的缓存结构，避免排序时重复遍历
     private struct HoleData
     {
         public List<Vector2> Points;
@@ -13,11 +11,18 @@ public class PolygonHoleMerger
         public int MaxXIndex;
     }
 
+    // 缓存动态生成的桥，用于防止后续桥穿插
+    private struct BridgeSegment
+    {
+        public Vector2 A;
+        public Vector2 B;
+    }
+
     public static List<Vector2> Merge(List<Vector2> outRing, List<List<Vector2>> holes)
     {
         if (holes == null || holes.Count == 0) return new List<Vector2>(outRing);
 
-        // 1. 预处理数据 (优化排序性能)
+        // 1. 准备数据 & 排序 (O(H log H))
         List<HoleData> holeDatas = new List<HoleData>(holes.Count);
         for (int i = 0; i < holes.Count; i++)
         {
@@ -30,207 +35,130 @@ public class PolygonHoleMerger
             }
             holeDatas.Add(new HoleData { Points = h, Index = i, MaxX = max, MaxXIndex = idx });
         }
+        holeDatas.Sort((a, b) => b.MaxX.CompareTo(a.MaxX)); // 从右向左合并
 
-        // 2. 排序：O(H log H) - 现在的比较是 O(1)
-        holeDatas.Sort((a, b) => b.MaxX.CompareTo(a.MaxX));
+        // 2. 构建静态 AABB 树 (O(TotalV log TotalV))
+        // 包含所有“不可穿越”的原始墙壁
+        SegmentAABBTree staticWallTree = new SegmentAABBTree(outRing, holes);
+
+        // 3. 动态桥列表 (用于记录新生成的切割线)
+        List<BridgeSegment> dynamicBridges = new List<BridgeSegment>();
 
         List<Vector2> merged = new List<Vector2>(outRing);
 
-        // 缓存 merged 的包围盒，用于快速剔除
-        // (在复杂场景下可进一步维护动态AABB树，此处暂用简单逻辑)
-
-        // 3. 逐个合并
-        // 总复杂度优化目标：接近 O(H * N)
+        // 4. 逐个合并
+        // 总循环次数 H
         for (int h = 0; h < holeDatas.Count; h++)
         {
             HoleData currentHoleData = holeDatas[h];
             List<Vector2> currentHole = currentHoleData.Points;
             Vector2 M = currentHole[currentHoleData.MaxXIndex];
 
-            // === 优化策略：射线投射法 ===
-            // 不再盲目遍历所有点，而是寻找“M”向右射线的最近交点边
-            // 该边的两个端点是极高概率的最佳候选点 P
-
-            int bestConnectIndex = -1;
-
-            // 尝试通过射线法快速找到候选点 (O(N))
-            int raycastCandidateIndex = FindBridgeByRaycast(M, merged);
-
-            if (raycastCandidateIndex != -1)
-            {
-                // 如果射线法找到了点，验证其合法性
-                if (IsBridgeValid(M, merged[raycastCandidateIndex], merged, holeDatas, h))
-                {
-                    bestConnectIndex = raycastCandidateIndex;
-                }
-            }
-
-            // 如果射线法失败（例如被其他洞挡住，虽然极少发生），回退到全局搜索 (Fallback)
-            // 这保证了算法的鲁棒性，同时在 99% 的情况下享受 O(N) 的性能
-            if (bestConnectIndex == -1)
-            {
-                bestConnectIndex = FindBridgeByGlobalSearch(M, merged, holeDatas, h);
-            }
+            // === 寻找最佳连接点 P ===
+            // 这里我们遍历 merged 列表 (O(N))
+            // 但内部的 Check 变成了 O(log N)
+            // 总复杂度: O(N log N)
+            int bestConnectIndex = FindBestBridgePoint(M, merged, staticWallTree, dynamicBridges);
 
             if (bestConnectIndex != -1)
             {
+                Vector2 P = merged[bestConnectIndex];
+
+                // 记录新桥 (M <-> P)
+                // 这保证了下一个洞不会穿过这条线
+                dynamicBridges.Add(new BridgeSegment { A = M, B = P });
+
+                // 执行几何缝合
                 List<Vector2> insertion = new List<Vector2>();
                 int holeCount = currentHole.Count;
                 for (int i = 0; i < holeCount; i++)
                 {
                     insertion.Add(currentHole[(currentHoleData.MaxXIndex + i) % holeCount]);
                 }
-                insertion.Add(M); // M -> ... -> M
-                insertion.Add(merged[bestConnectIndex]); // 回程桥 P
+                insertion.Add(M); // 回到起点的 M
+                insertion.Add(P); // 回到 merged 上的 P
 
                 merged.InsertRange(bestConnectIndex + 1, insertion);
             }
             else
             {
-                Debug.LogWarning("Merge Failed: 无法找到合法的桥接点。");
+                Debug.LogWarning($"[Merge] Failed to merge hole {h}. Skipping.");
             }
         }
 
         return merged;
     }
 
-    // 优化 1: 射线法寻找候选边 (O(N))
-    private static int FindBridgeByRaycast(Vector2 M, List<Vector2> poly)
-    {
-        float minRayDist = float.MaxValue;
-        int bestIndex = -1;
-        Vector2 rayDir = Vector2.right;
-
-        int count = poly.Count;
-        for (int i = 0; i < count; i++)
-        {
-            Vector2 p1 = poly[i];
-            Vector2 p2 = poly[(i + 1) % count];
-
-            // 快速 AABB 剔除：如果边的 Y 范围不包含 M.y，或都在 M 左侧，跳过
-            if ((p1.y < M.y && p2.y < M.y) || (p1.y > M.y && p2.y > M.y)) continue;
-            if (p1.x < M.x && p2.x < M.x) continue;
-
-            // 射线相交检测
-            if (RayIntersectsSegment(M, rayDir, p1, p2, out float distance))
-            {
-                if (distance < minRayDist)
-                {
-                    minRayDist = distance;
-                    // 选择该边中 X 较大的那个点作为候选点 (通常视角更好)
-                    // 或者选择距离 M 最近的点
-                    bestIndex = (p1.x > p2.x) ? i : (i + 1) % count;
-                }
-            }
-        }
-        return bestIndex;
-    }
-
-    // 优化 2: 全局搜索 (带距离剪枝)
-    private static int FindBridgeByGlobalSearch(Vector2 M, List<Vector2> merged, List<HoleData> allHoles, int currentHoleIdx)
+    // 优化后的搜索函数
+    private static int FindBestBridgePoint(
+        Vector2 M,
+        List<Vector2> mergedPoly,
+        SegmentAABBTree tree,
+        List<BridgeSegment> existingBridges)
     {
         int bestIndex = -1;
         float minDistSq = float.MaxValue;
-        int count = merged.Count;
+        int count = mergedPoly.Count;
 
+        // 遍历 merged 上所有可能的点 P
         for (int i = 0; i < count; i++)
         {
-            Vector2 P = merged[i];
-            // 只考虑右侧的点 (简化)
+            Vector2 P = mergedPoly[i];
+
+            // 1. 基础剪枝：只找右侧的点 (配合 MaxX 策略)
             if (P.x <= M.x) continue;
 
             float distSq = (P - M).sqrMagnitude;
-            if (distSq < minDistSq)
-            {
-                // 在调用昂贵的 IsBridgeValid 前，先做距离判断
-                // 如果当前距离已经大于找到的最小距离，根本不用检测
 
-                if (IsBridgeValid(M, P, merged, allHoles, currentHoleIdx))
-                {
-                    minDistSq = distSq;
-                    bestIndex = i;
-                }
+            // 2. 距离剪枝
+            if (distSq >= minDistSq) continue;
+
+            // 3. 核心验证 (Expensive Check)
+            // 只有当距离更近时，才进行昂贵的几何检测
+            if (IsBridgeValid(M, P, tree, existingBridges))
+            {
+                minDistSq = distSq;
+                bestIndex = i;
             }
         }
         return bestIndex;
     }
 
-    private static bool IsBridgeValid(Vector2 start, Vector2 end, List<Vector2> mergedPoly, List<HoleData> allHoles, int currentHoleIndex)
+    // 验证逻辑：检查是否撞墙 (Tree) 或 撞桥 (List)
+    private static bool IsBridgeValid(
+        Vector2 start,
+        Vector2 end,
+        SegmentAABBTree tree,
+        List<BridgeSegment> bridges)
     {
-        // AABB 预检查：构建桥的包围盒
-        float minX = Mathf.Min(start.x, end.x);
-        float maxX = Mathf.Max(start.x, end.x);
-        float minY = Mathf.Min(start.y, end.y);
-        float maxY = Mathf.Max(start.y, end.y);
+        // 1. 检查原始几何体 (O(log N))
+        if (tree.Intersects(start, end)) return false;
 
-        // 1. 检查主体
-        if (LineIntersectsPolygon(start, end, mergedPoly, minX, maxX, minY, maxY)) return false;
-
-        // 2. 检查其他未合并的洞
-        for (int h = currentHoleIndex + 1; h < allHoles.Count; h++)
+        // 2. 检查动态生成的桥 (O(Number of Holes))
+        // 桥的数量通常很少 (<50)，线性遍历极快
+        foreach (var bridge in bridges)
         {
-            // 简单的 AABB 剔除：如果洞的 MaxX 都比桥的 MinX 小，肯定不相交 (因为洞排过序，这步其实很有用)
-            if (allHoles[h].MaxX < minX) continue;
+            // 排除共享顶点
+            if ((start - bridge.A).sqrMagnitude < 1e-9f || (start - bridge.B).sqrMagnitude < 1e-9f ||
+                (end - bridge.A).sqrMagnitude < 1e-9f || (end - bridge.B).sqrMagnitude < 1e-9f)
+                continue;
 
-            if (LineIntersectsPolygon(start, end, allHoles[h].Points, minX, maxX, minY, maxY)) return false;
+            if (SegmentsIntersect(start, end, bridge.A, bridge.B)) return false;
         }
 
-        // 3. 检查自身
-        if (LineIntersectsPolygon(start, end, allHoles[currentHoleIndex].Points, minX, maxX, minY, maxY)) return false;
+        // 3. 自交检查 (Edge Case)
+        // 理论上 Tree 已经包含了所有可能的墙，但如果 merged 产生了复杂的自缠绕（虽然不该发生），
+        // 这里的逻辑通常已经足够安全。
 
         return true;
     }
 
-    // 带 AABB 优化的线段与多边形相交检测
-    private static bool LineIntersectsPolygon(Vector2 start, Vector2 end, List<Vector2> poly, float bMinX, float bMaxX, float bMinY, float bMaxY)
-    {
-        int count = poly.Count;
-        for (int i = 0; i < count; i++)
-        {
-            Vector2 p1 = poly[i];
-            Vector2 p2 = poly[(i + 1) % count];
-
-            // 边 AABB 剔除
-            if (Mathf.Max(p1.x, p2.x) < bMinX || Mathf.Min(p1.x, p2.x) > bMaxX ||
-                Mathf.Max(p1.y, p2.y) < bMinY || Mathf.Min(p1.y, p2.y) > bMaxY)
-                continue;
-
-            if (p1 == start || p1 == end || p2 == start || p2 == end) continue;
-
-            if (SegmentsIntersect(start, end, p1, p2)) return true;
-        }
-        return false;
-    }
-
-    private static bool RayIntersectsSegment(Vector2 origin, Vector2 direction, Vector2 p1, Vector2 p2, out float distance)
-    {
-        distance = 0f;
-        Vector2 v1 = origin - p1;
-        Vector2 v2 = p2 - p1;
-        Vector2 v3 = new Vector2(-direction.y, direction.x);
-
-        float dot = Vector2.Dot(v2, v3);
-        if (Mathf.Abs(dot) < 0.000001f) return false;
-
-        float t1 = (v2.x * v1.y - v2.y * v1.x) / dot;
-        float t2 = Vector2.Dot(v1, v3) / dot;
-
-        if (t1 >= 0.0f && (t2 >= 0.0f && t2 <= 1.0f))
-        {
-            distance = t1;
-            return true;
-        }
-        return false;
-    }
-
     private static bool SegmentsIntersect(Vector2 a, Vector2 b, Vector2 c, Vector2 d)
     {
-        float denominator = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
-        if (denominator == 0) return false;
-
-        float u = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / denominator;
-        float v = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / denominator;
-
-        return (u > 0 && u < 1 && v > 0 && v < 1);
+        float den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
+        if (den == 0) return false;
+        float u = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / den;
+        float v = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / den;
+        return (u > 1e-5f && u < 0.99999f && v > 1e-5f && v < 0.99999f);
     }
 }
