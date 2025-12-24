@@ -81,52 +81,52 @@ public static class Slicer
             public int Right;
         }
 
-        private FlatNode[] _nodes;
-        private int[] _indices; // 间接索引数组，用于排序而不移动实际 PolygonData
-        private int _nodesUsed;
-        private List<PolygonData> _srcData;
+        private FlatNode[] nodes;
+        private int[] indices; // 间接索引数组，用于排序而不移动实际 PolygonData
+        private int nodesUsed;
+        private List<PolygonData> srcData;
 
         public void Build(List<PolygonData> solids)
         {
             if (solids == null || solids.Count == 0) return;
-            _srcData = solids;
+            srcData = solids;
             int count = solids.Count;
 
             // 分配内存 (节点数最多 2*N)
-            if (_nodes == null || _nodes.Length < count * 2)
-                _nodes = new FlatNode[count * 2];
+            if (nodes == null || nodes.Length < count * 2)
+                nodes = new FlatNode[count * 2];
 
-            if (_indices == null || _indices.Length < count)
-                _indices = new int[count];
+            if (indices == null || indices.Length < count)
+                indices = new int[count];
 
             // 初始化索引
-            for (int i = 0; i < count; i++) _indices[i] = i;
+            for (int i = 0; i < count; i++) indices[i] = i;
 
-            _nodesUsed = 0;
+            nodesUsed = 0;
             BuildRecursive(0, count);
         }
 
         private int BuildRecursive(int start, int count)
         {
-            int nodeIndex = _nodesUsed++;
+            int nodeIndex = nodesUsed++;
             // 计算总包围盒
-            Bounds total = _srcData[_indices[start]].Bounds;
+            Bounds total = srcData[indices[start]].Bounds;
             for (int i = 1; i < count; i++)
             {
-                total.Encapsulate(_srcData[_indices[start + i]].Bounds);
+                total.Encapsulate(srcData[indices[start + i]].Bounds);
             }
-            _nodes[nodeIndex].Box = total;
+            nodes[nodeIndex].Box = total;
 
             // 叶子节点
             if (count == 1)
             {
-                _nodes[nodeIndex].PolygonIndex = _indices[start];
-                _nodes[nodeIndex].Left = -1;
-                _nodes[nodeIndex].Right = -1;
+                nodes[nodeIndex].PolygonIndex = indices[start];
+                nodes[nodeIndex].Left = -1;
+                nodes[nodeIndex].Right = -1;
                 return nodeIndex;
             }
 
-            _nodes[nodeIndex].PolygonIndex = -1;
+            nodes[nodeIndex].PolygonIndex = -1;
 
             // 划分 (Partition)
             bool splitX = total.size.x > total.size.y;
@@ -137,7 +137,7 @@ public static class Slicer
             int right = start + count - 1;
             while (left <= right)
             {
-                PolygonData p = _srcData[_indices[left]];
+                PolygonData p = srcData[indices[left]];
                 float center = splitX ? p.Bounds.center.x : p.Bounds.center.y;
 
                 if (center < mid)
@@ -147,9 +147,9 @@ public static class Slicer
                 else
                 {
                     // Swap indices
-                    int temp = _indices[left];
-                    _indices[left] = _indices[right];
-                    _indices[right] = temp;
+                    int temp = indices[left];
+                    indices[left] = indices[right];
+                    indices[right] = temp;
                     right--;
                 }
             }
@@ -157,27 +157,27 @@ public static class Slicer
             int leftCount = left - start;
             if (leftCount == 0 || leftCount == count) leftCount = count / 2; // 防止死循环
 
-            _nodes[nodeIndex].Left = BuildRecursive(start, leftCount);
-            _nodes[nodeIndex].Right = BuildRecursive(start + leftCount, count - leftCount);
+            nodes[nodeIndex].Left = BuildRecursive(start, leftCount);
+            nodes[nodeIndex].Right = BuildRecursive(start + leftCount, count - leftCount);
 
             return nodeIndex;
         }
 
         public PolygonData QueryBestParent(Vector2 point, float holeArea)
         {
-            if (_srcData == null || _srcData.Count == 0) return null;
+            if (srcData == null || srcData.Count == 0) return null;
             return QueryRecursive(0, point, holeArea);
         }
 
         private PolygonData QueryRecursive(int nodeIdx, Vector2 point, float holeArea)
         {
             // AABB 剔除
-            if (!_nodes[nodeIdx].Box.Contains(new Vector3(point.x, point.y, 0))) return null;
+            if (!nodes[nodeIdx].Box.Contains(new Vector3(point.x, point.y, 0))) return null;
 
             // 叶子节点处理
-            if (_nodes[nodeIdx].PolygonIndex != -1)
+            if (nodes[nodeIdx].PolygonIndex != -1)
             {
-                PolygonData candidate = _srcData[_nodes[nodeIdx].PolygonIndex];
+                PolygonData candidate = srcData[nodes[nodeIdx].PolygonIndex];
                 // 面积检查 & 精确点包含检查
                 if (candidate.Area > holeArea && IsPointInPolygon(point, candidate.OuterLoop))
                 {
@@ -188,8 +188,8 @@ public static class Slicer
 
             // 递归查询左右子树
             // 优先找面积更小的父节点？这里逻辑是找任何合法的，然后取最小的。
-            PolygonData l = QueryRecursive(_nodes[nodeIdx].Left, point, holeArea);
-            PolygonData r = QueryRecursive(_nodes[nodeIdx].Right, point, holeArea);
+            PolygonData l = QueryRecursive(nodes[nodeIdx].Left, point, holeArea);
+            PolygonData r = QueryRecursive(nodes[nodeIdx].Right, point, holeArea);
 
             if (l != null && r != null)
                 return l.Area < r.Area ? l : r;
