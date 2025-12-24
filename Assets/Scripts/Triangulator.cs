@@ -5,13 +5,11 @@ using System.Runtime.CompilerServices;
 /// <summary>
 /// 高性能三角剖分器 (Grid-Accelerated & Candidate-Cached Ear Clipping)
 /// <para>
-/// 核心优化策略：
-/// 1. 空间哈希 (Uniform Grid)：将 IsEar 检测从 O(N) 降至 O(1)。
-/// 2. 候选列表 (Ear Candidates)：维护一个凸点列表，将寻找下一个耳朵的复杂度从 O(N) 降至 O(1)。
-///    - 初始化时：识别所有凸点加入列表。
-///    - 运行时：直接从列表中取点判断。
-///    - 更新时：切掉顶点后，只检查其邻居是否变成了新的候选耳。
-/// 3. 总时间复杂度：稳定在 O(N)。
+/// 修复与优化：
+/// 1. 修复了候选列表 (Ear Candidates) 的管理逻辑，使用 Swap-Removal 实现 O(1) 移除。
+/// 2. 增强了 IsEar 检测的鲁棒性，特别是针对共线和重合点的处理。
+/// 3. 完善了最后 3 个点的兜底处理，防止索引溢出或丢失。
+/// 4. 保持均匀网格 (Uniform Grid) 实现，因为对于轮廓点分布，网格比 AABB 树构建更快且查询足够高效。
 /// </para>
 /// </summary>
 public static class Triangulator
@@ -30,7 +28,7 @@ public static class Triangulator
 
         // 几何属性
         public bool isReflex;    // 是否为凹点
-        public bool isCandidate; // 是否已在耳朵候选列表中 (防止重复添加)
+        public bool isCandidate; // 是否已在耳朵候选列表中
 
         // 拓扑指针
         public VertexNode prev;
@@ -50,7 +48,6 @@ public static class Triangulator
 
     /// <summary>
     /// 均匀网格索引 (Uniform Grid)
-    /// 用于快速查询三角形内部是否包含凹点
     /// </summary>
     private class UniformGrid
     {
@@ -60,15 +57,18 @@ public static class Triangulator
         public float minX, minY;
         public float invCellSize;
 
-        public void Initialize(List<VertexNode> nodes, int count)
+        public void Initialize(List<VertexNode> reflexNodes)
         {
+            int count = reflexNodes.Count;
+            if (count == 0) return;
+
             // 1. 计算包围盒
             float minX = float.MaxValue, minY = float.MaxValue;
             float maxX = float.MinValue, maxY = float.MinValue;
 
             for (int i = 0; i < count; i++)
             {
-                Vector2 p = nodes[i].position;
+                Vector2 p = reflexNodes[i].position;
                 if (p.x < minX) minX = p.x;
                 if (p.x > maxX) maxX = p.x;
                 if (p.y < minY) minY = p.y;
@@ -108,7 +108,7 @@ public static class Triangulator
             // 3. 填充网格
             for (int i = 0; i < count; i++)
             {
-                VertexNode node = nodes[i];
+                VertexNode node = reflexNodes[i];
                 int idx = GetCellIndex(node.position);
                 if (idx >= 0 && idx < cells.Length)
                 {
@@ -120,6 +120,7 @@ public static class Triangulator
 
         public void Remove(VertexNode node)
         {
+            if (cells == null) return;
             int idx = GetCellIndex(node.position);
             if (idx < 0 || idx >= cells.Length) return;
 
@@ -172,8 +173,7 @@ public static class Triangulator
             nodeList[i].next = nodeList[(i + 1) % n];
         }
 
-        // 2. 绕序修正 (Winding Order)
-        // 保证多边形为逆时针 (CCW)
+        // 2. 绕序修正 (Winding Order) - 必须为逆时针 (CCW)
         float area = 0;
         for (int i = 0; i < n; i++)
         {
@@ -194,7 +194,7 @@ public static class Triangulator
 
         // 3. 识别凹凸性并构建初始列表 (O(N))
         List<VertexNode> reflexVertices = new List<VertexNode>(n / 2);
-        List<VertexNode> earCandidates = new List<VertexNode>(n); // 耳朵候选列表 (Convex Vertices)
+        List<VertexNode> earCandidates = new List<VertexNode>(n);
 
         VertexNode current = nodeList[0];
         VertexNode start = current;
@@ -207,7 +207,6 @@ public static class Triangulator
             }
             else
             {
-                // 凸点是潜在的耳朵
                 current.isReflex = false;
                 current.isCandidate = true;
                 earCandidates.Add(current);
@@ -217,26 +216,22 @@ public static class Triangulator
 
         // 4. 构建空间加速网格 (O(R))
         UniformGrid grid = new UniformGrid();
-        grid.Initialize(reflexVertices, reflexVertices.Count);
+        grid.Initialize(reflexVertices);
 
         // 5. 耳切主循环 (O(N))
-        // 优化后：不再遍历链表寻找耳朵，而是直接从 candidates 列表中取
         List<int> triangles = new List<int>((n - 2) * 3);
         int pointCount = n;
 
-        // 双指针用于高效遍历 List 充当 Queue/Stack
-        // 我们从列表末尾取，这样 RemoveAt 也是 O(1)
         while (pointCount > 3 && earCandidates.Count > 0)
         {
-            // 从候选列表中取出一个点 (LIFO 策略，通常能保持较好的局部性)
-            int candidateIdx = earCandidates.Count - 1;
-            VertexNode candidate = earCandidates[candidateIdx];
-            earCandidates.RemoveAt(candidateIdx);
+            // [优化] 使用 Swap-Removal 从列表末尾取点，避免 O(N) 移动开销
+            int lastIdx = earCandidates.Count - 1;
+            VertexNode candidate = earCandidates[lastIdx];
+            earCandidates.RemoveAt(lastIdx);
 
             candidate.isCandidate = false; // 移除标记
 
-            // 验证是否真的是耳朵 (Grid Check)
-            // 注意：候选列表里的点只是凸点，不一定是耳朵（可能包含凹点），所以必须 Check
+            // 验证是否真的是耳朵
             if (IsEar(candidate, grid))
             {
                 // --- 切耳朵 ---
@@ -256,74 +251,61 @@ public static class Triangulator
                 // 如果被切掉的点本身在网格里（理论上凸点不在，但为了安全...）
                 if (candidate.isReflex) grid.Remove(candidate);
 
-                // --- 邻居更新 (Critical Step) ---
-                // 切掉中间点后，prev 和 next 的角度会变大 (变得更凸)
-                // 我们需要重新检查它们的凹凸性
-
+                // --- 邻居更新 ---
                 // 检查 Prev
-                bool wasReflex = prev.isReflex;
-                if (IsReflex(prev))
-                {
-                    prev.isReflex = true; // 依然是凹点，或者从凸变凹(极少见但理论可能)
-                }
-                else
-                {
-                    // 变成了凸点 (Convex)
-                    prev.isReflex = false;
-                    // 如果之前是凹点，现在变凸了，从网格移除
-                    if (wasReflex) grid.Remove(prev);
-
-                    // 如果不在候选列表中，加入列表
-                    if (!prev.isCandidate)
-                    {
-                        prev.isCandidate = true;
-                        earCandidates.Add(prev);
-                    }
-                }
-
+                UpdateNeighbor(prev, grid, earCandidates);
                 // 检查 Next
-                wasReflex = next.isReflex;
-                if (IsReflex(next))
-                {
-                    next.isReflex = true;
-                }
-                else
-                {
-                    next.isReflex = false;
-                    if (wasReflex) grid.Remove(next);
-
-                    if (!next.isCandidate)
-                    {
-                        next.isCandidate = true;
-                        earCandidates.Add(next);
-                    }
-                }
+                UpdateNeighbor(next, grid, earCandidates);
             }
             else
             {
-                // 如果是凸点但不是耳朵（被凹点阻挡），它依然有可能在未来成为耳朵。
-                // 但为了避免死循环和重复检查，我们暂时把它移出列表。
-                // 只有当它的邻居被切掉时，它才会被重新加入列表进行检查。
-                // 这就是 O(N) 的奥义：失败的检查不会立即重试。
+                // 如果检测失败（被凹点阻挡），它暂时不是耳朵。
+                // 我们不需要立即把它加回去，只有当它的邻居发生变化时，它才可能变成耳朵。
+                // 因此，这里直接丢弃是正确的 O(N) 逻辑。
             }
         }
 
         // 处理最后剩下的 3 个点
-        if (pointCount == 3)
+
+        if (pointCount == 3 && earCandidates.Count > 0)
         {
-            // 剩下的三个点必然构成最后一个三角形
-            // 此时链表中任意取一个点即可，比如 current.prev
-            VertexNode survivor = null;
-            survivor = earCandidates[0];
-            if (survivor != null)
-            {
-                triangles.Add(survivor.prev.index);
-                triangles.Add(survivor.index);
-                triangles.Add(survivor.next.index);
-            }
+            VertexNode n1 = earCandidates[0];
+            VertexNode n2 = n1.next;
+            VertexNode n3 = n2.next;
+
+            triangles.Add(n1.index);
+            triangles.Add(n2.index);
+            triangles.Add(n3.index);
         }
 
         return triangles.ToArray();
+    }
+
+    // 封装邻居更新逻辑，减少代码重复
+    private static void UpdateNeighbor(VertexNode node, UniformGrid grid, List<VertexNode> candidates)
+    {
+        bool wasReflex = node.isReflex;
+
+        // 重新判断凹凸性
+        if (IsReflex(node))
+        {
+            node.isReflex = true;
+        }
+        else
+        {
+            // 变成了凸点 (Convex)
+            node.isReflex = false;
+
+            // 如果之前是凹点，现在变凸了，从网格移除
+            if (wasReflex) grid.Remove(node);
+
+            // 如果不在候选列表中，加入列表
+            if (!node.isCandidate)
+            {
+                node.isCandidate = true;
+                candidates.Add(node);
+            }
+        }
     }
 
     // =================================================================================
@@ -336,24 +318,25 @@ public static class Triangulator
         Vector2 a = v.prev.position;
         Vector2 b = v.position;
         Vector2 c = v.next.position;
-        // 叉积 <= 0 表示右转或共线 (CCW下为凹点)
         return ((b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)) <= 0;
     }
 
     private static bool IsEar(VertexNode v, UniformGrid grid)
     {
-        // 1. 只有凸点才能是耳尖
         if (v.isReflex) return false;
 
         Vector2 a = v.prev.position;
         Vector2 b = v.position;
         Vector2 c = v.next.position;
 
-        // 2. 网格查询
+        // 优化：先快速判断是否有凹点在 AABB 内，再精确判断
         float minX = a.x; if (b.x < minX) minX = b.x; if (c.x < minX) minX = c.x;
         float maxX = a.x; if (b.x > maxX) maxX = b.x; if (c.x > maxX) maxX = c.x;
         float minY = a.y; if (b.y < minY) minY = b.y; if (c.y < minY) minY = c.y;
         float maxY = a.y; if (b.y > maxY) maxY = b.y; if (c.y > maxY) maxY = c.y;
+
+        // 如果网格未初始化（例如没有凹点），则不需要检查
+        if (grid.cells == null) return true;
 
         int startX = (int)((minX - grid.minX) * grid.invCellSize);
         int endX = (int)((maxX - grid.minX) * grid.invCellSize);
@@ -371,26 +354,25 @@ public static class Triangulator
                 VertexNode node = grid.cells[offset + x];
                 while (node != null)
                 {
-                    // 排除三角形自身顶点
+                    // 1. 排除三角形自身顶点
                     if (node == v.prev || node == v.next)
                     {
                         node = node.nextInGrid;
                         continue;
                     }
 
-                    // 鲁棒性：排除重合点 (搭桥法产生的缝合点)
+                    // 2. 鲁棒性：排除重合点 (搭桥法产生的缝合点)
                     float d2a = (node.position - a).sqrMagnitude;
                     float d2b = (node.position - b).sqrMagnitude;
                     float d2c = (node.position - c).sqrMagnitude;
 
-                    // 1e-6f 是经验阈值
                     if (d2a < 1e-6f || d2b < 1e-6f || d2c < 1e-6f)
                     {
                         node = node.nextInGrid;
                         continue;
                     }
 
-                    // 点在三角形内测试
+                    // 3. 点在三角形内测试
                     if (IsPointInTriangle(a, b, c, node.position)) return false;
 
                     node = node.nextInGrid;

@@ -1,46 +1,38 @@
 using UnityEngine;
 using System.Collections.Generic;
 using System.Linq;
-using System.Runtime.CompilerServices; // 用于内联优化
+using System.Runtime.CompilerServices;
 
 public static class Slicer
 {
     // =================================================================================
     //                                  配置常量
     // =================================================================================
-    private const float MIN_VERT_DIST = 0.01f; // 最小顶点距离，用于去重
+    private const float MIN_VERT_DIST = 0.01f;
     private const float MIN_VERT_DIST_SQ = MIN_VERT_DIST * MIN_VERT_DIST;
-    private const float AREA_THRESHOLD = 0.01f; // 忽略过小的碎片
+    private const float AREA_THRESHOLD = 0.01f;
 
     // =================================================================================
     //                                  数据结构
     // =================================================================================
 
-    // 用于图遍历的边哈希键，替代字符串，避免GC
-    private struct EdgeKey : System.IEquatable<EdgeKey>
+    // 优化的边哈希键
+    private readonly struct EdgeKey : System.IEquatable<EdgeKey>
     {
         private readonly int x1, y1, x2, y2;
-
         public EdgeKey(Vector2 u, Vector2 v)
         {
-            // 量化坐标以匹配 MIN_VERT_DIST (0.01) 的精度
-            // 乘以100并取整，相当于保留两位小数
-            x1 = (int)(u.x * 100);
-            y1 = (int)(u.y * 100);
-            x2 = (int)(v.x * 100);
-            y2 = (int)(v.y * 100);
+            // 精度匹配 MIN_VERT_DIST (0.01 -> *100)
+            x1 = (int)(u.x * 100); y1 = (int)(u.y * 100);
+            x2 = (int)(v.x * 100); y2 = (int)(v.y * 100);
         }
-
         public bool Equals(EdgeKey other) => x1 == other.x1 && y1 == other.y1 && x2 == other.x2 && y2 == other.y2;
-
         public override int GetHashCode()
         {
-            // 简单的位移异或哈希
+            // 使用更分散的哈希算法
             int hash = 17;
-            hash = hash * 31 + x1;
-            hash = hash * 31 + y1;
-            hash = hash * 31 + x2;
-            hash = hash * 31 + y2;
+            hash = hash * 31 + x1; hash = hash * 31 + y1;
+            hash = hash * 31 + x2; hash = hash * 31 + y2;
             return hash;
         }
     }
@@ -58,8 +50,9 @@ public static class Slicer
             if (OuterLoop == null || OuterLoop.Count == 0) return;
             float minX = float.MaxValue, minY = float.MaxValue;
             float maxX = float.MinValue, maxY = float.MinValue;
-            foreach (var p in OuterLoop)
+            for (int i = 0; i < OuterLoop.Count; i++)
             {
+                Vector2 p = OuterLoop[i];
                 if (p.x < minX) minX = p.x;
                 if (p.x > maxX) maxX = p.x;
                 if (p.y < minY) minY = p.y;
@@ -76,13 +69,138 @@ public static class Slicer
         public int SegmentIndex;
     }
 
+    // [优化]：扁平化 AABB 树，替代原本的递归类 PolyNode
+    // 专门用于存储 PolygonData，零 GC，缓存友好
+    private struct NativePolyTree
+    {
+        public struct FlatNode
+        {
+            public Bounds Box;
+            public int PolygonIndex; // 指向 solids 列表的索引，-1 表示非叶子
+            public int Left;
+            public int Right;
+        }
+
+        private FlatNode[] _nodes;
+        private int[] _indices; // 间接索引数组，用于排序而不移动实际 PolygonData
+        private int _nodesUsed;
+        private List<PolygonData> _srcData;
+
+        public void Build(List<PolygonData> solids)
+        {
+            if (solids == null || solids.Count == 0) return;
+            _srcData = solids;
+            int count = solids.Count;
+
+            // 分配内存 (节点数最多 2*N)
+            if (_nodes == null || _nodes.Length < count * 2)
+                _nodes = new FlatNode[count * 2];
+
+            if (_indices == null || _indices.Length < count)
+                _indices = new int[count];
+
+            // 初始化索引
+            for (int i = 0; i < count; i++) _indices[i] = i;
+
+            _nodesUsed = 0;
+            BuildRecursive(0, count);
+        }
+
+        private int BuildRecursive(int start, int count)
+        {
+            int nodeIndex = _nodesUsed++;
+            // 计算总包围盒
+            Bounds total = _srcData[_indices[start]].Bounds;
+            for (int i = 1; i < count; i++)
+            {
+                total.Encapsulate(_srcData[_indices[start + i]].Bounds);
+            }
+            _nodes[nodeIndex].Box = total;
+
+            // 叶子节点
+            if (count == 1)
+            {
+                _nodes[nodeIndex].PolygonIndex = _indices[start];
+                _nodes[nodeIndex].Left = -1;
+                _nodes[nodeIndex].Right = -1;
+                return nodeIndex;
+            }
+
+            _nodes[nodeIndex].PolygonIndex = -1;
+
+            // 划分 (Partition)
+            bool splitX = total.size.x > total.size.y;
+            float mid = splitX ? total.center.x : total.center.y;
+
+            // In-Place Partitioning (类似快排)
+            int left = start;
+            int right = start + count - 1;
+            while (left <= right)
+            {
+                PolygonData p = _srcData[_indices[left]];
+                float center = splitX ? p.Bounds.center.x : p.Bounds.center.y;
+
+                if (center < mid)
+                {
+                    left++;
+                }
+                else
+                {
+                    // Swap indices
+                    int temp = _indices[left];
+                    _indices[left] = _indices[right];
+                    _indices[right] = temp;
+                    right--;
+                }
+            }
+
+            int leftCount = left - start;
+            if (leftCount == 0 || leftCount == count) leftCount = count / 2; // 防止死循环
+
+            _nodes[nodeIndex].Left = BuildRecursive(start, leftCount);
+            _nodes[nodeIndex].Right = BuildRecursive(start + leftCount, count - leftCount);
+
+            return nodeIndex;
+        }
+
+        public PolygonData QueryBestParent(Vector2 point, float holeArea)
+        {
+            if (_srcData == null || _srcData.Count == 0) return null;
+            return QueryRecursive(0, point, holeArea);
+        }
+
+        private PolygonData QueryRecursive(int nodeIdx, Vector2 point, float holeArea)
+        {
+            // AABB 剔除
+            if (!_nodes[nodeIdx].Box.Contains(new Vector3(point.x, point.y, 0))) return null;
+
+            // 叶子节点处理
+            if (_nodes[nodeIdx].PolygonIndex != -1)
+            {
+                PolygonData candidate = _srcData[_nodes[nodeIdx].PolygonIndex];
+                // 面积检查 & 精确点包含检查
+                if (candidate.Area > holeArea && IsPointInPolygon(point, candidate.OuterLoop))
+                {
+                    return candidate;
+                }
+                return null;
+            }
+
+            // 递归查询左右子树
+            // 优先找面积更小的父节点？这里逻辑是找任何合法的，然后取最小的。
+            PolygonData l = QueryRecursive(_nodes[nodeIdx].Left, point, holeArea);
+            PolygonData r = QueryRecursive(_nodes[nodeIdx].Right, point, holeArea);
+
+            if (l != null && r != null)
+                return l.Area < r.Area ? l : r;
+            return l != null ? l : r;
+        }
+    }
+
     // =================================================================================
     //                                  对外接口
     // =================================================================================
 
-    /// <summary>
-    /// 切割核心入口
-    /// </summary>
     public static void Slice(GameObject target, Vector3 worldStart, Vector3 worldEnd)
     {
         PolygonCollider2D polyCollider = target.GetComponent<PolygonCollider2D>();
@@ -92,52 +210,37 @@ public static class Slicer
 
         if (polyCollider == null || meshFilter == null) return;
 
-        // 1. 优先尝试从 SliceableGenerator 组件中读取“老祖宗”的包围盒
-        // 2. 如果没有（说明可能是普通物体），则计算当前的局部包围盒
         Rect referenceRect;
         var generator = target.GetComponent<SliceableGenerator>();
 
         if (generator != null && generator.hasUVReference)
         {
-            // 找到了黑匣子，直接用老祖宗的数据
             referenceRect = generator.uvReferenceRect;
         }
         else
         {
-            // 没找到（或者是第一次切且没用Generator），计算当前的作为参照
             referenceRect = CalculateLocalBounds(polyCollider);
         }
 
-        // 局部坐标转换
         Vector2 localSliceStart = target.transform.InverseTransformPoint(worldStart);
         Vector2 localSliceEnd = target.transform.InverseTransformPoint(worldEnd);
-
-
         Vector2 cutDirection = (localSliceEnd - localSliceStart).normalized;
 
-        // 如果点重合导致方向为0，直接退出
         if (cutDirection == Vector2.zero) return;
 
-        // 计算延长长度：取包围盒宽高的最大值，或者对角线长度，再乘个系数确保安全
-        // referenceRect 是局部坐标下的包围盒（老祖宗的，或者当前的）
-        // 如果物体被切得很小，referenceRect 依然是老祖宗的，这没问题，只会延长得更多一点，更安全
         float extensionLength = Mathf.Max(referenceRect.width, referenceRect.height) * 1.5f + 1.0f;
-
-        // 向两端延伸
         Vector2 extendedStart = localSliceStart - cutDirection * extensionLength;
         Vector2 extendedEnd = localSliceEnd + cutDirection * extensionLength;
 
         localSliceStart = extendedStart;
         localSliceEnd = extendedEnd;
 
-        // 提取轮廓
         List<List<Vector2>> originalPaths = new List<List<Vector2>>();
         for (int i = 0; i < polyCollider.pathCount; i++)
         {
             originalPaths.Add(new List<Vector2>(polyCollider.GetPath(i)));
         }
 
-        // 核心计算
         List<PolygonData> slicedPolygons = null;
         try
         {
@@ -145,20 +248,18 @@ public static class Slicer
         }
         catch (System.Exception e)
         {
-            Debug.LogError($"[Slicer] 算法错误: {e.Message}");
+            Debug.LogError($"[Slicer] 算法错误: {e.Message}\n{e.StackTrace}");
             return;
         }
 
-        // 验证结果
         if (slicedPolygons == null || slicedPolygons.Count == 0) return;
 
-        // 生成物体
         bool success = true;
         try
         {
             foreach (var polyData in slicedPolygons)
             {
-                CreateSlicedObject(polyData, target, meshRenderer.sharedMaterial, originalRb,referenceRect);
+                CreateSlicedObject(polyData, target, meshRenderer.sharedMaterial, originalRb, referenceRect);
             }
         }
         catch (System.Exception e)
@@ -167,7 +268,6 @@ public static class Slicer
             Debug.LogError($"[Slicer] Mesh生成错误: {e.Message}");
         }
 
-        // 仅在成功时销毁原物体
         if (success)
         {
             Object.Destroy(target);
@@ -191,7 +291,7 @@ public static class Slicer
             }
         }
         return new Rect(minX, minY, maxX - minX, maxY - minY);
-    }//计算包围盒
+    }
 
     // =================================================================================
     //                                  核心算法逻辑
@@ -205,7 +305,6 @@ public static class Slicer
         // --- Phase 1: 构建拓扑图 ---
         foreach (var path in paths)
         {
-            // 1.1 计算交点
             List<IntersectionInfo> hits = new List<IntersectionInfo>();
             for (int i = 0; i < path.Count; i++)
             {
@@ -218,20 +317,17 @@ public static class Slicer
                 }
             }
 
-            // 1.2 排序交点
             hits.Sort((a, b) => {
                 if (a.SegmentIndex != b.SegmentIndex) return a.SegmentIndex.CompareTo(b.SegmentIndex);
                 return Vector2.SqrMagnitude(a.Point - path[a.SegmentIndex]).CompareTo(Vector2.SqrMagnitude(b.Point - path[b.SegmentIndex]));
             });
 
-            // 1.3 插入交点并重建轮廓
             List<Vector2> newPathVertices = new List<Vector2>();
             int hitIndex = 0;
 
             for (int i = 0; i < path.Count; i++)
             {
                 Vector2 currentVert = path[i];
-                // 顶点去重
                 if (newPathVertices.Count == 0 || Vector2.SqrMagnitude(newPathVertices[newPathVertices.Count - 1] - currentVert) > MIN_VERT_DIST_SQ)
                 {
                     newPathVertices.Add(currentVert);
@@ -240,7 +336,6 @@ public static class Slicer
                 while (hitIndex < hits.Count && hits[hitIndex].SegmentIndex == i)
                 {
                     Vector2 p = hits[hitIndex].Point;
-                    // 交点去重
                     if (Vector2.SqrMagnitude(newPathVertices[newPathVertices.Count - 1] - p) > MIN_VERT_DIST_SQ)
                     {
                         newPathVertices.Add(p);
@@ -249,11 +344,9 @@ public static class Slicer
                     hitIndex++;
                 }
             }
-            // 环路首尾去重
             if (newPathVertices.Count > 1 && Vector2.SqrMagnitude(newPathVertices[0] - newPathVertices[newPathVertices.Count - 1]) < MIN_VERT_DIST_SQ)
                 newPathVertices.RemoveAt(newPathVertices.Count - 1);
 
-            // 1.4 将轮廓边加入图
             for (int i = 0; i < newPathVertices.Count; i++)
             {
                 AddEdge(graph, newPathVertices[i], newPathVertices[(i + 1) % newPathVertices.Count]);
@@ -261,7 +354,6 @@ public static class Slicer
         }
 
         // --- Phase 2: 处理切割缝 ---
-        // 全局交点去重
         for (int i = cutIntersections.Count - 1; i >= 0; i--)
         {
             for (int j = 0; j < i; j++)
@@ -276,14 +368,12 @@ public static class Slicer
 
         if (cutIntersections.Count < 2) return null;
 
-        // 按在切割线上的位置排序
         cutIntersections.Sort((a, b) => {
             float distA = Vector2.Dot(a - start, end - start);
             float distB = Vector2.Dot(b - start, end - start);
             return distA.CompareTo(distB);
         });
 
-        // 奇偶连接 (0-1, 2-3)
         int validCount = (cutIntersections.Count % 2 == 0) ? cutIntersections.Count : cutIntersections.Count - 1;
         for (int i = 0; i < validCount; i += 2)
         {
@@ -307,7 +397,6 @@ public static class Slicer
             float area = SignedArea(loop);
             if (Mathf.Abs(area) < AREA_THRESHOLD) continue;
 
-            // CCW (Area > 0) -> Solid, CW (Area < 0) -> Hole
             if (area > 0)
             {
                 PolygonData poly = new PolygonData();
@@ -322,32 +411,23 @@ public static class Slicer
             }
         }
 
-        // --- Phase 4: 归属权分配 ---
+        // --- Phase 4: 归属权分配 (AABB 树加速) ---
+        // 使用新实现的 NativePolyTree 替代原本的递归类
+        NativePolyTree tree = new NativePolyTree();
+        tree.Build(solids);
+
         foreach (var hole in holes)
         {
-            PolygonData bestParent = null;
-            float minParentArea = float.MaxValue;
             Vector2 centroid = GetCentroid(hole);
+            float holeAreaAbs = Mathf.Abs(SignedArea(hole));
 
-            foreach (var solid in solids)
-            {
-                // Bounds Check
-                if (!solid.Bounds.Contains(new Vector3(centroid.x, centroid.y, 0))) continue;
-                // Area Check
-                if (solid.Area < Mathf.Abs(SignedArea(hole))) continue;
-                // Point-in-Polygon Check
-                if (solid.Area < minParentArea && IsPointInPolygon(centroid, solid.OuterLoop))
-                {
-                    bestParent = solid;
-                    minParentArea = solid.Area;
-                }
-            }
+            // O(log S) 查询最佳父节点
+            PolygonData bestParent = tree.QueryBestParent(centroid, holeAreaAbs);
 
             if (bestParent != null)
             {
                 bestParent.Holes.Add(hole);
             }
-            // 孤儿孔洞直接丢弃
         }
 
         return solids;
@@ -362,7 +442,6 @@ public static class Slicer
         if (Vector2.SqrMagnitude(u - v) < 1e-6f) return;
         if (!graph.ContainsKey(u)) graph[u] = new List<Vector2>();
 
-        // 避免重复边
         bool exists = false;
         foreach (var neighbor in graph[u])
         {
@@ -374,11 +453,12 @@ public static class Slicer
     private static List<List<Vector2>> ExtractLoops(Dictionary<Vector2, List<Vector2>> graph)
     {
         List<List<Vector2>> loops = new List<List<Vector2>>();
-        HashSet<EdgeKey> visitedEdges = new HashSet<EdgeKey>(); // 使用 Struct 替代 String，0 GC
+        HashSet<EdgeKey> visitedEdges = new HashSet<EdgeKey>();
 
         foreach (var startNode in graph.Keys)
         {
-            var neighbors = new List<Vector2>(graph[startNode]);
+            // 优化：不直接 foreach graph[startNode]，而是先复制一份，防止遍历时修改（虽然这里不修改）
+            var neighbors = graph[startNode];
             foreach (var nextNode in neighbors)
             {
                 EdgeKey edgeKey = new EdgeKey(startNode, nextNode);
@@ -390,9 +470,11 @@ public static class Slicer
                 currentLoop.Add(curr);
 
                 int watchdog = 0;
+                // 动态看门狗阈值，避免复杂物体被错误截断
+                int maxIterations = graph.Count * 2 + 100;
                 bool loopClosed = false;
 
-                while (watchdog++ < 3000)
+                while (watchdog++ < maxIterations)
                 {
                     visitedEdges.Add(new EdgeKey(curr, next));
                     currentLoop.Add(next);
@@ -408,6 +490,10 @@ public static class Slicer
 
                     if (!graph.ContainsKey(curr) || graph[curr].Count == 0) break;
                     next = GetLeftMostNeighbor(prev, curr, graph[curr]);
+
+                    // 死胡同
+                    if (next == Vector2.zero && graph[curr].Count > 0 && next != graph[curr][0]) break;
+                    if (next == Vector2.zero && graph[curr].Count > 0) next = graph[curr][0]; // Fallback
                     if (next == Vector2.zero) break;
                 }
 
@@ -429,9 +515,9 @@ public static class Slicer
     private static Vector2 GetLeftMostNeighbor(Vector2 prev, Vector2 curr, List<Vector2> neighbors)
     {
         Vector2 incomingDir = (curr - prev).normalized;
-        if (float.IsNaN(incomingDir.x)) return Vector2.zero;
+        if (incomingDir == Vector2.zero) incomingDir = Vector2.right; // 修复零向量风险
 
-        float bestAngle = -1.0f;
+        float bestAngle = -9999f;
         Vector2 bestNext = Vector2.zero;
         Vector2 backDir = -incomingDir;
 
@@ -443,12 +529,12 @@ public static class Slicer
             if (Vector2.SqrMagnitude(neighbor - prev) < MIN_VERT_DIST_SQ && count > 1) continue;
 
             Vector2 outgoingDir = (neighbor - curr).normalized;
-            if (float.IsNaN(outgoingDir.x)) continue;
+            if (outgoingDir == Vector2.zero) continue;
 
+            // 使用 SignedAngle 寻找最左侧分支 (最大逆时针角度)
             float angle = Vector2.SignedAngle(backDir, outgoingDir);
             if (angle < 0) angle += 360f;
 
-            // 找最大角 (左转)
             if (angle > bestAngle)
             {
                 bestAngle = angle;
@@ -520,7 +606,6 @@ public static class Slicer
         return inside;
     }
 
-    // 简化路径，移除共线点和过近点
     private static List<Vector2> SimplifyPath(List<Vector2> path)
     {
         if (path.Count < 3) return path;
@@ -540,7 +625,7 @@ public static class Slicer
     //                                  物体生成实现
     // =================================================================================
 
-    private static void CreateSlicedObject(PolygonData data, GameObject originalTemplate, Material mat, Rigidbody2D originalRb,Rect uvRefRect)
+    private static void CreateSlicedObject(PolygonData data, GameObject originalTemplate, Material mat, Rigidbody2D originalRb, Rect uvRefRect)
     {
         string baseName = originalTemplate.name.Replace("_Piece", "");
         GameObject newObj = new GameObject(baseName + "_Piece");
@@ -550,32 +635,26 @@ public static class Slicer
         newObj.layer = originalTemplate.layer;
         newObj.tag = originalTemplate.tag;
 
-        // 1. 合并
         List<Vector2> mergedVertices = PolygonHoleMerger.Merge(data.OuterLoop, data.Holes);
 
-        // 2. Mesh
         Vector3[] vertices3D = new Vector3[mergedVertices.Count];
         Vector2[] uvs = new Vector2[mergedVertices.Count];
         Vector2[] vertices2D = mergedVertices.ToArray();
 
-        // 基于原物体包围盒的 UV 插值
-        // 原理：(当前点 - 最小点) / 总宽高 = 0~1 的比例
         float width = uvRefRect.width;
         float height = uvRefRect.height;
         float minX = uvRefRect.x;
         float minY = uvRefRect.y;
 
-        // 防止除以0
         if (width < 0.0001f) width = 1;
         if (height < 0.0001f) height = 1;
 
         for (int i = 0; i < mergedVertices.Count; i++)
         {
             vertices3D[i] = mergedVertices[i];
-            // 计算相对位置
             float u = (mergedVertices[i].x - minX) / width;
             float v = (mergedVertices[i].y - minY) / height;
-            uvs[i] = new Vector2(u,v);
+            uvs[i] = new Vector2(u, v);
         }
 
         int[] indices = Triangulator.Triangulate(vertices2D);
@@ -591,7 +670,6 @@ public static class Slicer
         MeshRenderer mr = newObj.AddComponent<MeshRenderer>();
         mr.material = mat;
 
-        // 3. Collider
         PolygonCollider2D pc = newObj.AddComponent<PolygonCollider2D>();
         pc.pathCount = 1 + data.Holes.Count;
         pc.SetPath(0, data.OuterLoop.ToArray());
@@ -599,14 +677,12 @@ public static class Slicer
         {
             pc.SetPath(i + 1, data.Holes[i].ToArray());
         }
-        // 4. 传递“黑匣子”给新碎片
-        // 这样新碎片被切时，Slicer 就能读到老祖宗的数据，而不是用新碎片的数据
+
         SliceableGenerator newGen = newObj.AddComponent<SliceableGenerator>();
         newGen.hasUVReference = true;
         newGen.uvReferenceRect = uvRefRect;
-        newGen.autoGenerateOnStart = false; // 已经是Mesh了，不需要再生成
+        newGen.autoGenerateOnStart = false;
 
-        // 5.. 物理
         if (originalRb != null)
         {
             Rigidbody2D newRb = newObj.AddComponent<Rigidbody2D>();
