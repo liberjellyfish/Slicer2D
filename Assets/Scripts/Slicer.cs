@@ -76,6 +76,211 @@ public static class Slicer
         }
     }
 
+    /// <summary>
+    /// 曲线贯穿切割：使用折线路径切割目标物体。
+    /// </summary>
+    public static void CurveSlice(GameObject target, List<Vector3> worldCutPath)
+    {
+        PolygonCollider2D polyCollider = target.GetComponent<PolygonCollider2D>();
+        MeshRenderer meshRenderer = target.GetComponent<MeshRenderer>();
+        Rigidbody2D originalRb = target.GetComponent<Rigidbody2D>();
+        if (polyCollider == null || meshRenderer == null) return;
+
+        Rect referenceRect;
+        var generator = target.GetComponent<SliceableGenerator>();
+        if (generator != null && generator.hasUVReference) referenceRect = generator.uvReferenceRect;
+        else referenceRect = CalculateLocalBounds(polyCollider);
+
+        // 将世界空间路径转换为物体局部空间
+        List<Vector2> localCutPath = new List<Vector2>(worldCutPath.Count);
+        for (int i = 0; i < worldCutPath.Count; i++)
+        {
+            localCutPath.Add(target.transform.InverseTransformPoint(worldCutPath[i]));
+        }
+
+        if (localCutPath.Count < 2) return;
+
+        // 延长头尾切线，确保曲线完全穿透包围盒
+        float extensionLength = Mathf.Max(referenceRect.width, referenceRect.height) * 1.5f + 1.0f;
+
+        // 头部延长：沿第一条线段的反方向
+        Vector2 headDir = (localCutPath[1] - localCutPath[0]).normalized;
+        if (headDir != Vector2.zero)
+        {
+            localCutPath[0] = localCutPath[0] - headDir * extensionLength;
+        }
+
+        // 尾部延长：沿最后一条线段的正方向
+        int last = localCutPath.Count - 1;
+        Vector2 tailDir = (localCutPath[last] - localCutPath[last - 1]).normalized;
+        if (tailDir != Vector2.zero)
+        {
+            localCutPath[last] = localCutPath[last] + tailDir * extensionLength;
+        }
+
+        // 提取路径
+        List<List<Vector2>> originalPaths = new List<List<Vector2>>(polyCollider.pathCount);
+        for (int i = 0; i < polyCollider.pathCount; i++)
+        {
+            originalPaths.Add(new List<Vector2>(polyCollider.GetPath(i)));
+        }
+
+        // 调用核心曲线切割算法
+        List<SlicerCore.PolygonData> slicedPolygons = null;
+        try
+        {
+            slicedPolygons = SlicerCore.CalculateCurve(originalPaths, localCutPath);
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"[Slicer] CurveSlice Error: {e.Message}\n{e.StackTrace}");
+            return;
+        }
+
+        if (slicedPolygons == null || slicedPolygons.Count == 0) return;
+
+        bool success = true;
+        try
+        {
+            foreach (var polyData in slicedPolygons)
+            {
+                CreateSlicedObject(polyData, target, meshRenderer.sharedMaterial, originalRb, referenceRect);
+            }
+        }
+        catch (System.Exception e)
+        {
+            success = false;
+            Debug.LogError($"[Slicer] CurveSlice MeshGen Error: {e.Message}");
+        }
+        finally
+        {
+            SlicerCore.ReturnResultToPool(slicedPolygons);
+        }
+
+        if (success)
+        {
+            Object.Destroy(target);
+        }
+    }
+
+    /// <summary>
+    /// 挖孔切割：将闭合环作为新孔洞注入目标物体。
+    /// 将环本身生成一个新的刚体碎片。
+    /// </summary>
+    public static void HolePunch(GameObject target, List<Vector2> worldLoop)
+    {
+        PolygonCollider2D polyCollider = target.GetComponent<PolygonCollider2D>();
+        MeshRenderer meshRenderer = target.GetComponent<MeshRenderer>();
+        Rigidbody2D originalRb = target.GetComponent<Rigidbody2D>();
+        if (polyCollider == null || meshRenderer == null) return;
+
+        Rect referenceRect;
+        var generator = target.GetComponent<SliceableGenerator>();
+        if (generator != null && generator.hasUVReference) referenceRect = generator.uvReferenceRect;
+        else referenceRect = CalculateLocalBounds(polyCollider);
+
+        // 转局部坐标
+        List<Vector2> localLoop = new List<Vector2>(worldLoop.Count);
+        for (int i = 0; i < worldLoop.Count; i++)
+        {
+            localLoop.Add(target.transform.InverseTransformPoint(worldLoop[i]));
+        }
+
+        // 验证环中心点在多边形内
+        List<Vector2> outerPath = new List<Vector2>(polyCollider.GetPath(0));
+        Vector2 testPoint = localLoop[0];
+        if (!SlicerMath.PointInPolygon(testPoint, outerPath))
+        {
+            Debug.LogWarning("[Slicer] HolePunch: 环不在目标多边形内部");
+            return;
+        }
+
+        // 提取原有路径数据
+        List<List<Vector2>> originalPaths = new List<List<Vector2>>(polyCollider.pathCount);
+        for (int i = 0; i < polyCollider.pathCount; i++)
+        {
+            originalPaths.Add(new List<Vector2>(polyCollider.GetPath(i)));
+        }
+
+        // 确保环的绕序为顺时针（作为孔洞）
+        float loopArea = 0;
+        for (int i = 0; i < localLoop.Count; i++)
+        {
+            Vector2 p1 = localLoop[i];
+            Vector2 p2 = localLoop[(i + 1) % localLoop.Count];
+            loopArea += (p1.x * p2.y) - (p2.x * p1.y);
+        }
+        if (loopArea > 0) localLoop.Reverse(); // 如果是逆时针，翻转为顺时针
+
+        // 构造母体碎片（带上新孔洞）
+        SlicerCore.PolygonData motherPoly = new SlicerCore.PolygonData();
+        motherPoly.OuterLoop = originalPaths[0];
+        motherPoly.Holes = new List<List<Vector2>>();
+        // 继承原有孔洞
+        for (int i = 1; i < originalPaths.Count; i++)
+        {
+            motherPoly.Holes.Add(originalPaths[i]);
+        }
+        // 添加新孔洞
+        motherPoly.Holes.Add(localLoop);
+
+        float motherArea = 0;
+        for (int i = 0; i < motherPoly.OuterLoop.Count; i++)
+        {
+            Vector2 p1 = motherPoly.OuterLoop[i];
+            Vector2 p2 = motherPoly.OuterLoop[(i + 1) % motherPoly.OuterLoop.Count];
+            motherArea += (p1.x * p2.y) - (p2.x * p1.y);
+        }
+        motherPoly.Area = Mathf.Abs(motherArea / 2f);
+
+        // 构造掉落碎片（孔洞的反转形即为碎片的外边界）
+        List<Vector2> pieceBoundary = new List<Vector2>(localLoop);
+        pieceBoundary.Reverse(); // 顺时针 → 逆时针 = 实体外边界
+
+        SlicerCore.PolygonData piecePoly = new SlicerCore.PolygonData();
+        piecePoly.OuterLoop = pieceBoundary;
+        piecePoly.Holes = new List<List<Vector2>>();
+
+        // 检测原有孔洞中是否有被新环完全吞噬的孔洞
+        for (int i = motherPoly.Holes.Count - 2; i >= 0; i--) // -2 因为最后一个是新孔洞
+        {
+            List<Vector2> existingHole = motherPoly.Holes[i];
+            if (existingHole.Count > 0 && SlicerMath.PointInPolygon(existingHole[0], pieceBoundary))
+            {
+                // 旧孔被新环吞噬：从母体移除，转移给碎片
+                piecePoly.Holes.Add(existingHole);
+                motherPoly.Holes.RemoveAt(i);
+            }
+        }
+
+        float pieceArea = 0;
+        for (int i = 0; i < pieceBoundary.Count; i++)
+        {
+            Vector2 p1 = pieceBoundary[i];
+            Vector2 p2 = pieceBoundary[(i + 1) % pieceBoundary.Count];
+            pieceArea += (p1.x * p2.y) - (p2.x * p1.y);
+        }
+        piecePoly.Area = Mathf.Abs(pieceArea / 2f);
+
+        // 生成两个物体
+        bool success = true;
+        try
+        {
+            CreateSlicedObject(motherPoly, target, meshRenderer.sharedMaterial, originalRb, referenceRect);
+            CreateSlicedObject(piecePoly, target, meshRenderer.sharedMaterial, originalRb, referenceRect);
+        }
+        catch (System.Exception e)
+        {
+            success = false;
+            Debug.LogError($"[Slicer] HolePunch MeshGen Error: {e.Message}");
+        }
+
+        if (success)
+        {
+            Object.Destroy(target);
+        }
+    }
+
     private static Rect CalculateLocalBounds(PolygonCollider2D col)
     {
         // 逻辑不变...
