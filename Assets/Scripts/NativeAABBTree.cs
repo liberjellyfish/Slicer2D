@@ -1,17 +1,19 @@
 using UnityEngine;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using Unity.Collections;
+using System;
 
 /// <summary>
 /// 高性能静态 AABB 树 (High-Performance Static AABB Tree)
 /// <para>
 /// 设计目标：
-/// 1. 零 GC (Zero Garbage Collection)：使用扁平化数组替代对象引用，构建过程中不产生堆内存分配。
+/// 1. 零 GC (Zero Garbage Collection)：使用 NativeArray 替代托管数组，构建过程中不产生堆内存分配。
 /// 2. 缓存友好 (Cache Friendly)：节点在内存中连续存放，提高 CPU 缓存命中率。
 /// 3. SIMD 友好：叶子节点批量存储 4 条边，便于后续扩展 SIMD 指令集优化。
 /// </para>
 /// </summary>
-public class NativeAABBTree
+public struct NativeAABBTree : IDisposable
 {
     /// <summary>
     /// 扁平化树节点 (32 bytes)
@@ -63,9 +65,9 @@ public class NativeAABBTree
     }
 
     // === 核心数据存储 ===
-    // 预分配的大数组，对象池复用
-    private FlatNode[] nodes;
-    private Segment[] segments; // 这里的线段会被 QuickSort 风格重排
+    // 使用 Allocator.Temp 极速分配的多线程安全内存池
+    private NativeArray<FlatNode> nodes;
+    private NativeArray<Segment> segments; 
     private int nodesUsed;
 
     // 叶子容量阈值：小于此数量不再分裂
@@ -86,13 +88,9 @@ public class NativeAABBTree
             for (int i = 0; i < holes.Count; i++) totalEdges += holes[i].Count;
         }
 
-        // 懒加载初始化或扩容
-        if (segments == null || segments.Length < totalEdges)
-            segments = new Segment[totalEdges];
-
-        // 二叉树节点数上限约为 2*N
-        if (nodes == null || nodes.Length < totalEdges * 2)
-            nodes = new FlatNode[totalEdges * 2];
+        // 分配物理内存池 (单帧结束前必须 Dispose)
+        segments = new NativeArray<Segment>(totalEdges, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
+        nodes = new NativeArray<FlatNode>(totalEdges * 2, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
 
         // 2. 填充线段数组 (此时是乱序的)
         int ptr = 0;
@@ -124,14 +122,17 @@ public class NativeAABBTree
             Vector2 p2 = loop[(i + 1) % count];
 
             // 存入数据
-            segments[ptr].P1 = p1;
-            segments[ptr].P2 = p2;
+            Segment s = new Segment();
+            s.P1 = p1;
+            s.P2 = p2;
 
             // 预计算 Min/Max，加速后续的 Partition 过程
-            segments[ptr].minX = p1.x < p2.x ? p1.x : p2.x;
-            segments[ptr].minY = p1.y < p2.y ? p1.y : p2.y;
-            segments[ptr].maxX = p1.x > p2.x ? p1.x : p2.x;
-            segments[ptr].maxY = p1.y > p2.y ? p1.y : p2.y;
+            s.minX = p1.x < p2.x ? p1.x : p2.x;
+            s.minY = p1.y < p2.y ? p1.y : p2.y;
+            s.maxX = p1.x > p2.x ? p1.x : p2.x;
+            s.maxY = p1.y > p2.y ? p1.y : p2.y;
+            
+            segments[ptr] = s;
             ptr++;
         }
     }
@@ -151,29 +152,32 @@ public class NativeAABBTree
 
         for (int i = 0; i < count; i++)
         {
-            ref Segment s = ref segments[start + i]; // 使用 ref 避免结构体拷贝
+            Segment s = segments[start + i];
             if (s.minX < minX) minX = s.minX;
             if (s.minY < minY) minY = s.minY;
             if (s.maxX > maxX) maxX = s.maxX;
             if (s.maxY > maxY) maxY = s.maxY;
         }
 
-        nodes[nodeIndex].minX = minX;
-        nodes[nodeIndex].minY = minY;
-        nodes[nodeIndex].maxX = maxX;
-        nodes[nodeIndex].maxY = maxY;
+        FlatNode node = new FlatNode();
+        node.minX = minX;
+        node.minY = minY;
+        node.maxX = maxX;
+        node.maxY = maxY;
 
         // 2. 叶子节点判定 (Base Case)
         if (count <= MAX_LEAF_SIZE)
         {
-            nodes[nodeIndex].segmentStartIndex = start;
-            nodes[nodeIndex].segmentCount = count;
-            nodes[nodeIndex].leftChildIndex = -1;
-            nodes[nodeIndex].rightChildIndex = -1;
+            node.segmentStartIndex = start;
+            node.segmentCount = count;
+            node.leftChildIndex = -1;
+            node.rightChildIndex = -1;
+            nodes[nodeIndex] = node;
             return nodeIndex;
         }
 
-        nodes[nodeIndex].segmentCount = 0; // 标记为非叶子
+        node.segmentCount = 0; // 标记为非叶子
+        nodes[nodeIndex] = node; // 占位保存，后续再更新 left/right
 
         // 3. 空间划分 (Spatial Partitioning)
         // 选择最长轴进行分割，使树更平衡
@@ -209,8 +213,13 @@ public class NativeAABBTree
         if (leftCount == 0 || leftCount == count) leftCount = count / 2;
 
         // 5. 递归
-        nodes[nodeIndex].leftChildIndex = BuildRecursive(start, leftCount);
-        nodes[nodeIndex].rightChildIndex = BuildRecursive(start + leftCount, count - leftCount);
+        int leftChild = BuildRecursive(start, leftCount);
+        int rightChild = BuildRecursive(start + leftCount, count - leftCount);
+
+        node = nodes[nodeIndex];
+        node.leftChildIndex = leftChild;
+        node.rightChildIndex = rightChild;
+        nodes[nodeIndex] = node;
 
         return nodeIndex;
     }
@@ -237,7 +246,7 @@ public class NativeAABBTree
             // 暴力遍历叶子内的几条边
             for (int i = start; i < end; i++)
             {
-                ref Segment s = ref segments[i];
+                Segment s = segments[i];
 
                 // 排除共享顶点 (如果连接点本身就在墙上，不算撞墙)
                 if (IsSamePoint(s.P1, p1) || IsSamePoint(s.P1, p2) ||
@@ -275,5 +284,11 @@ public class NativeAABBTree
 
         // 严格内部相交 (不包含端点)，防止误判邻边
         return (u > 1e-5f && u < 1f - 1e-5f && v > 1e-5f && v < 1f - 1e-5f);
+    }
+
+    public void Dispose()
+    {
+        if (nodes.IsCreated) nodes.Dispose();
+        if (segments.IsCreated) segments.Dispose();
     }
 }

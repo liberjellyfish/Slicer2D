@@ -54,11 +54,13 @@ public class PolygonHoleMerger
         NativeAABBTree staticWallTree = new NativeAABBTree();
         staticWallTree.Build(outRing, holes);
 
-        // 2. 链表化外圈
-        ListNode outerHead = CreateLoop(outRing);
+        try
+        {
+            // 2. 链表化外圈
+            ListNode outerHead = CreateLoop(outRing);
 
-        // 3. 预处理孔洞
-        List<HoleData> holeDatas = new List<HoleData>(holes.Count);
+            // 3. 预处理孔洞
+            List<HoleData> holeDatas = new List<HoleData>(holes.Count);
         for (int i = 0; i < holes.Count; i++)
         {
             var holePoints = holes[i];
@@ -115,7 +117,12 @@ public class PolygonHoleMerger
         }
 
         // 6. 还原为 List (O(N))
-        return FlattenList(outerHead);
+            return FlattenList(outerHead);
+        }
+        finally
+        {
+            staticWallTree.Dispose();
+        }
     }
 
     /// <summary>
