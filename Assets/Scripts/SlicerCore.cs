@@ -1,6 +1,10 @@
 using UnityEngine;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Burst;
+using System.Diagnostics;
 
 // 这是一个纯静态的计算核心，不依赖 GameObject 实例化
 public static class SlicerCore
@@ -174,6 +178,54 @@ public static class SlicerCore
         public int SegmentIndex;
     }
 
+    public struct CutSegment
+    {
+        public Vector2 P1;
+        public Vector2 P2;
+    }
+
+    public struct CutHitResult
+    {
+        public bool Hit;
+        public Vector2 Point;
+        public float T;
+    }
+
+    [BurstCompile]
+    public struct LineIntersectionJob : IJobParallelFor
+    {
+        [ReadOnly] public NativeArray<CutSegment> Segments;
+        public Vector2 SliceStart;
+        public Vector2 SliceEnd;
+
+        [WriteOnly] public NativeArray<CutHitResult> Results;
+
+        public void Execute(int index)
+        {
+            Vector2 p1 = Segments[index].P1;
+            Vector2 p2 = Segments[index].P2;
+
+            CutHitResult res = new CutHitResult();
+            res.Hit = false;
+
+            float d = (p2.x - p1.x) * (SliceEnd.y - SliceStart.y) - (p2.y - p1.y) * (SliceEnd.x - SliceStart.x);
+            if (UnityEngine.Mathf.Abs(d) >= 1e-6f)
+            {
+                float u = ((SliceStart.x - p1.x) * (SliceEnd.y - SliceStart.y) - (SliceStart.y - p1.y) * (SliceEnd.x - SliceStart.x)) / d;
+                float v = ((SliceStart.x - p1.x) * (p2.y - p1.y) - (SliceStart.y - p1.y) * (p2.x - p1.x)) / d;
+
+                if (u >= -1e-4f && u <= 1.0001f && v >= -1e-4f && v <= 1.0001f)
+                {
+                    res.Hit = true;
+                    // 使用 Mathf 来保持独立性，Burst 支持转换为底层指令
+                    res.T = UnityEngine.Mathf.Clamp01(v);
+                    res.Point = p1 + UnityEngine.Mathf.Clamp01(u) * (p2 - p1);
+                }
+            }
+            Results[index] = res;
+        }
+    }
+
     // =================================================================================
     //                                  对外计算接口
     // =================================================================================
@@ -192,57 +244,117 @@ public static class SlicerCore
 
         // --- Phase 1: 构建拓扑图 ---
         IntersectionComparer hitComparer = new IntersectionComparer();
+        int totalEdges = 0;
+        int pathsCount = originalPaths.Count;
+        for (int i = 0; i < pathsCount; i++) totalEdges += originalPaths[i].Count;
 
-        foreach (var path in originalPaths)
+        bool useJob = totalEdges > 128;
+        if (useJob) UnityEngine.Debug.Log("使用 JobSystem 进行切割计算");//
+        NativeArray<CutSegment> jobSegments = default;
+        NativeArray<CutHitResult> jobResults = default;
+
+        try
         {
-            context.TempHits.Clear();
-            hitComparer.Path = path; // 设置 Comparer 上下文
-
-            for (int i = 0; i < path.Count; i++)
+            if (useJob)
             {
-                Vector2 p1 = path[i];
-                Vector2 p2 = path[(i + 1) % path.Count];
+                jobSegments = new NativeArray<CutSegment>(totalEdges, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+                jobResults = new NativeArray<CutHitResult>(totalEdges, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
 
-                if (GetLineIntersection(p1, p2, start, end, out Vector2 intersection, out float t))
+                int offset = 0;
+                for (int pId = 0; pId < pathsCount; pId++)
                 {
-                    context.TempHits.Add(new IntersectionInfo { Point = intersection, T = t, SegmentIndex = i });
-                }
-            }
-
-            // 无 GC 排序
-            context.TempHits.Sort(hitComparer);
-
-            // 重建路径
-            context.TempNewPath.Clear();
-            var newPathVertices = context.TempNewPath;
-
-            int hitIndex = 0;
-            for (int i = 0; i < path.Count; i++)
-            {
-                Vector2 currentVert = path[i];
-                if (newPathVertices.Count == 0 || SqrDist(newPathVertices[newPathVertices.Count - 1], currentVert) > MIN_VERT_DIST_SQ)
-                {
-                    newPathVertices.Add(currentVert);
-                }
-
-                while (hitIndex < context.TempHits.Count && context.TempHits[hitIndex].SegmentIndex == i)
-                {
-                    Vector2 p = context.TempHits[hitIndex].Point;
-                    if (SqrDist(newPathVertices[newPathVertices.Count - 1], p) > MIN_VERT_DIST_SQ)
+                    var pList = originalPaths[pId];
+                    int pCount = pList.Count;
+                    for (int i = 0; i < pCount; i++)
                     {
-                        newPathVertices.Add(p);
-                        cutIntersections.Add(p);
+                        jobSegments[offset++] = new CutSegment { P1 = pList[i], P2 = pList[(i + 1) % pCount] };
                     }
-                    hitIndex++;
+                }
+
+                var job = new LineIntersectionJob
+                {
+                    Segments = jobSegments,
+                    SliceStart = start,
+                    SliceEnd = end,
+                    Results = jobResults
+                };
+                job.Schedule(totalEdges, 64).Complete(); // 阻塞等待核心全开算完
+            }
+
+            int globalEdgeCounter = 0;
+
+            for (int pId = 0; pId < pathsCount; pId++)
+            {
+                var path = originalPaths[pId];
+                context.TempHits.Clear();
+                hitComparer.Path = path; // 设置 Comparer 上下文
+                int pCount = path.Count;
+
+                for (int i = 0; i < pCount; i++)
+                {
+                    if (useJob)
+                    {
+                        CutHitResult res = jobResults[globalEdgeCounter++];
+                        if (res.Hit)
+                        {
+                            context.TempHits.Add(new IntersectionInfo { Point = res.Point, T = res.T, SegmentIndex = i });
+                        }
+                    }
+                    else
+                    {
+                        Vector2 p1 = path[i];
+                        Vector2 p2 = path[(i + 1) % pCount];
+
+                        if (GetLineIntersection(p1, p2, start, end, out Vector2 intersection, out float t))
+                        {
+                            context.TempHits.Add(new IntersectionInfo { Point = intersection, T = t, SegmentIndex = i });
+                        }
+                    }
+                }
+
+                // 无 GC 排序
+                context.TempHits.Sort(hitComparer);
+
+                // 重建路径
+                context.TempNewPath.Clear();
+                var newPathVertices = context.TempNewPath;
+
+                int hitIndex = 0;
+                for (int i = 0; i < path.Count; i++)
+                {
+                    Vector2 currentVert = path[i];
+                    if (newPathVertices.Count == 0 || SqrDist(newPathVertices[newPathVertices.Count - 1], currentVert) > MIN_VERT_DIST_SQ)
+                    {
+                        newPathVertices.Add(currentVert);
+                    }
+
+                    while (hitIndex < context.TempHits.Count && context.TempHits[hitIndex].SegmentIndex == i)
+                    {
+                        Vector2 p = context.TempHits[hitIndex].Point;
+                        if (SqrDist(newPathVertices[newPathVertices.Count - 1], p) > MIN_VERT_DIST_SQ)
+                        {
+                            newPathVertices.Add(p);
+                            cutIntersections.Add(p);
+                        }
+                        hitIndex++;
+                    }
+                }
+                // 闭合检查
+                if (newPathVertices.Count > 1 && SqrDist(newPathVertices[0], newPathVertices[newPathVertices.Count - 1]) < MIN_VERT_DIST_SQ)
+                    newPathVertices.RemoveAt(newPathVertices.Count - 1);
+
+                for (int i = 0; i < newPathVertices.Count; i++)
+                {
+                    AddEdge(graph, newPathVertices[i], newPathVertices[(i + 1) % newPathVertices.Count]);
                 }
             }
-            // 闭合检查
-            if (newPathVertices.Count > 1 && SqrDist(newPathVertices[0], newPathVertices[newPathVertices.Count - 1]) < MIN_VERT_DIST_SQ)
-                newPathVertices.RemoveAt(newPathVertices.Count - 1);
-
-            for (int i = 0; i < newPathVertices.Count; i++)
+        }
+        finally
+        {
+            if (useJob)
             {
-                AddEdge(graph, newPathVertices[i], newPathVertices[(i + 1) % newPathVertices.Count]);
+                if (jobSegments.IsCreated) jobSegments.Dispose();
+                if (jobResults.IsCreated) jobResults.Dispose();
             }
         }
 

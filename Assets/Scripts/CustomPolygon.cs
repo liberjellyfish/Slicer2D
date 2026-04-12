@@ -59,6 +59,10 @@ public class CustomPolygon : MonoBehaviour
         new Vector2(0.5f, -1.5f)
     };
 
+    [Header("Job-System 压力测试")]
+    [Tooltip("勾选后将自动覆盖生成超过 128 条边的超级圆环，用于触发 Job System。")]
+    public bool generateGiantPolygon = false;
+
     void OnEnable()
     {
         GenerateMesh();
@@ -68,10 +72,35 @@ public class CustomPolygon : MonoBehaviour
     void GenerateMesh()
     {
         // 1. 准备数据
-        List<List<Vector2>> holes = new List<List<Vector2>> { holeTL, holeTR, holeBL, holeBR, holeMID };
+        List<Vector2> activeOuterLoop = new List<Vector2>(outerLoop);
+        List<List<Vector2>> activeHoles = new List<List<Vector2>> { holeTL, holeTR, holeBL, holeBR, holeMID };
+
+        if (generateGiantPolygon)
+        {
+            activeOuterLoop.Clear();
+            activeHoles.Clear();
+
+            // 生成一个半径为 2.8 的大圆外圈 (100 条边)
+            for (int i = 0; i < 100; i++)
+            {
+                float angle = i * Mathf.PI * 2f / 100f;
+                // 逆时针
+                activeOuterLoop.Add(new Vector2(Mathf.Cos(angle) * 2.8f, Mathf.Sin(angle) * 2.8f));
+            }
+
+            // 生成一个内圈 (35 条边) => 总边数 135 > 128
+            List<Vector2> giantHole = new List<Vector2>();
+            for (int i = 0; i < 35; i++)
+            {
+                float angle = i * Mathf.PI * 2f / 35f;
+                // 顺时针
+                giantHole.Add(new Vector2(Mathf.Cos(-angle) * 1.5f, Mathf.Sin(-angle) * 1.5f));
+            }
+            activeHoles.Add(giantHole);
+        }
 
         // 2. 调用造桥算法，将所有洞融合进外圈
-        List<Vector2> mergedPoints = PolygonHoleMerger.Merge(outerLoop, holes);
+        List<Vector2> mergedPoints = PolygonHoleMerger.Merge(activeOuterLoop, activeHoles);
 
         // 3. 准备三角剖分数据
         Vector3[] vertices = new Vector3[mergedPoints.Count];
@@ -101,12 +130,12 @@ public class CustomPolygon : MonoBehaviour
 
         // 6. 设置 Collider (关键：多路径)
         PolygonCollider2D polyCol = GetComponent<PolygonCollider2D>();
-        polyCol.pathCount = 1 + holes.Count; // 1个外圈 + 4个洞
-        polyCol.SetPath(0, outerLoop.ToArray());
+        polyCol.pathCount = 1 + activeHoles.Count; // 1个外圈 + 多个洞
+        polyCol.SetPath(0, activeOuterLoop.ToArray());
 
-        for (int i = 0; i < holes.Count; i++)
+        for (int i = 0; i < activeHoles.Count; i++)
         {
-            polyCol.SetPath(i + 1, holes[i].ToArray());
+            polyCol.SetPath(i + 1, activeHoles[i].ToArray());
         }
     }
 }

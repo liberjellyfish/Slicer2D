@@ -17,7 +17,7 @@ public class MouseSlicer : MonoBehaviour
     public LayerMask sliceableLayer;//层级遮罩，只检测此层级
 
     //预分配射线检测结果数组。避免GC
-    private RaycastHit2D[] hitResults = new RaycastHit2D[16];
+    private RaycastHit2D[] hitResults = new RaycastHit2D[32];
 
     private ContactFilter2D contactFilter;
 
