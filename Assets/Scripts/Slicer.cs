@@ -78,8 +78,9 @@ public static class Slicer
 
     /// <summary>
     /// 曲线贯穿切割：使用折线路径切割目标物体。
+    /// 可以同时处理开放折线切透（直线、抛物线）、跨越边界的闭合环提取（如咬掉一个角）、以及纯净内部挖孔。
     /// </summary>
-    public static void CurveSlice(GameObject target, List<Vector3> worldCutPath)
+    public static void CurveSlice(GameObject target, List<Vector3> worldCutPath, bool isClosed)
     {
         PolygonCollider2D polyCollider = target.GetComponent<PolygonCollider2D>();
         MeshRenderer meshRenderer = target.GetComponent<MeshRenderer>();
@@ -100,32 +101,111 @@ public static class Slicer
 
         if (localCutPath.Count < 2) return;
 
-        // 延长头尾切线，确保曲线完全穿透包围盒
-        float extensionLength = Mathf.Max(referenceRect.width, referenceRect.height) * 1.5f + 1.0f;
-
-        // 头部延长：沿第一条线段的反方向
-        Vector2 headDir = (localCutPath[1] - localCutPath[0]).normalized;
-        if (headDir != Vector2.zero)
-        {
-            localCutPath[0] = localCutPath[0] - headDir * extensionLength;
-        }
-
-        // 尾部延长：沿最后一条线段的正方向
-        int last = localCutPath.Count - 1;
-        Vector2 tailDir = (localCutPath[last] - localCutPath[last - 1]).normalized;
-        if (tailDir != Vector2.zero)
-        {
-            localCutPath[last] = localCutPath[last] + tailDir * extensionLength;
-        }
-
-        // 提取路径
+        // 提取原有路径数据
         List<List<Vector2>> originalPaths = new List<List<Vector2>>(polyCollider.pathCount);
         for (int i = 0; i < polyCollider.pathCount; i++)
         {
             originalPaths.Add(new List<Vector2>(polyCollider.GetPath(i)));
         }
 
-        // 调用核心曲线切割算法
+        bool isPureHolePunch = false;
+
+        if (isClosed)
+        {
+            // --- 虚空自旋算法 (Shift & Boolean) ---
+            // 闭合环由于其闭包特性，必须保证起点不在实体肉内，以防止图论引擎的正交判定（Entry/Exit）反转。
+            
+            // 1. 寻找"虚空"中的点：在外边界之外（不在肉里），或者在任何一个孔洞之中（内部的虚空间）
+            int emptySpaceIndex = -1;
+            List<Vector2> outerPath = originalPaths[0];
+            
+            // 局部函数：验证点是否在虚空
+            bool IsPointInEmptySpace(Vector2 p)
+            {
+                if (!SlicerMath.PointInPolygon(p, outerPath)) return true;
+                for (int h = 1; h < originalPaths.Count; h++)
+                {
+                    if (SlicerMath.PointInPolygon(p, originalPaths[h])) return true;
+                }
+                return false;
+            }
+
+            for (int i = 0; i < localCutPath.Count; i++)
+            {
+                if (IsPointInEmptySpace(localCutPath[i]))
+                {
+                    emptySpaceIndex = i;
+                    break;
+                }
+                
+                // 线段过度采样 (Oversampling)：对抗 RDP 导致的弦高直线切边穿透内部曲线孔洞。
+                // 防止线段两头端点在肉里，但线段中段已经把孔洞切开的严重漏检漏判。
+                if (i < localCutPath.Count - 1)
+                {
+                    Vector2 p0 = localCutPath[i];
+                    Vector2 p1 = localCutPath[i + 1];
+                    for (int s = 1; s <= 4; s++)
+                    {
+                        Vector2 mid = Vector2.Lerp(p0, p1, s / 5f);
+                        if (IsPointInEmptySpace(mid))
+                        {
+                            // 发现切透点！将此采样点注入为真实的路径拐点
+                            localCutPath.Insert(i + 1, mid);
+                            emptySpaceIndex = i + 1;
+                            break;
+                        }
+                    }
+                    if (emptySpaceIndex != -1) break;
+                }
+            }
+
+            if (emptySpaceIndex == -1)
+            {
+                // [完全包围] 环线全在肉内，即使包围了内部孔也是纯净的实体吞噬，走合并算法
+                isPureHolePunch = true;
+            }
+            else if (emptySpaceIndex > 0)
+            {
+                // [跨越边界/孔洞] 环线部分在肉外，存在拓扑切割，必须自旋对齐虚空起点
+                List<Vector2> rotated = new List<Vector2>(localCutPath.Count);
+                for (int i = emptySpaceIndex; i < localCutPath.Count - 1; i++) // -1 抛弃末尾，由最后补回
+                    rotated.Add(localCutPath[i]);
+                for (int i = 0; i < emptySpaceIndex; i++)
+                    rotated.Add(localCutPath[i]);
+                
+                rotated.Add(rotated[0]); // 重新完美闭合
+                localCutPath = rotated;
+            }
+        }
+        else
+        {
+            // 延长头尾切线，确保纯开放曲线完全穿透包围盒
+            float extensionLength = Mathf.Max(referenceRect.width, referenceRect.height) * 1.5f + 1.0f;
+
+            // 头部延长：沿第一条线段的反方向
+            Vector2 headDir = (localCutPath[1] - localCutPath[0]).normalized;
+            if (headDir != Vector2.zero)
+            {
+                localCutPath[0] = localCutPath[0] - headDir * extensionLength;
+            }
+
+            // 尾部延长：沿最后一条线段的正方向
+            int last = localCutPath.Count - 1;
+            Vector2 tailDir = (localCutPath[last] - localCutPath[last - 1]).normalized;
+            if (tailDir != Vector2.zero)
+            {
+                localCutPath[last] = localCutPath[last] + tailDir * extensionLength;
+            }
+        }
+
+        // 分发逻辑
+        if (isPureHolePunch)
+        {
+            PerformHolePunch(target, meshRenderer, originalRb, referenceRect, originalPaths, localCutPath);
+            return;
+        }
+
+        // 调用核心曲线布尔运算算法
         List<SlicerCore.PolygonData> slicedPolygons = null;
         try
         {
@@ -164,42 +244,19 @@ public static class Slicer
     }
 
     /// <summary>
-    /// 挖孔切割：将闭合环作为新孔洞注入目标物体。
-    /// 将环本身生成一个新的刚体碎片。
+    /// 纯净内部挖孔切割：当闭合环完全处于多边形内部，且未切割外圈与内穴边时执行。
+    /// （现已作为 CurveSlice 混合分流的一个私有保护层，不再向外界直接暴露）
     /// </summary>
-    public static void HolePunch(GameObject target, List<Vector2> worldLoop)
+    private static void PerformHolePunch(GameObject target, MeshRenderer meshRenderer, Rigidbody2D originalRb, 
+                                         Rect referenceRect, List<List<Vector2>> originalPaths, List<Vector2> localLoop)
     {
-        PolygonCollider2D polyCollider = target.GetComponent<PolygonCollider2D>();
-        MeshRenderer meshRenderer = target.GetComponent<MeshRenderer>();
-        Rigidbody2D originalRb = target.GetComponent<Rigidbody2D>();
-        if (polyCollider == null || meshRenderer == null) return;
-
-        Rect referenceRect;
-        var generator = target.GetComponent<SliceableGenerator>();
-        if (generator != null && generator.hasUVReference) referenceRect = generator.uvReferenceRect;
-        else referenceRect = CalculateLocalBounds(polyCollider);
-
-        // 转局部坐标
-        List<Vector2> localLoop = new List<Vector2>(worldLoop.Count);
-        for (int i = 0; i < worldLoop.Count; i++)
-        {
-            localLoop.Add(target.transform.InverseTransformPoint(worldLoop[i]));
-        }
-
         // 验证环中心点在多边形内
-        List<Vector2> outerPath = new List<Vector2>(polyCollider.GetPath(0));
+        List<Vector2> outerPath = originalPaths[0];
         Vector2 testPoint = localLoop[0];
         if (!SlicerMath.PointInPolygon(testPoint, outerPath))
         {
-            Debug.LogWarning("[Slicer] HolePunch: 环不在目标多边形内部");
+            Debug.LogWarning("[Slicer] HolePunch: 闭环不位于实体内部，这应在自旋阶段被拦截");
             return;
-        }
-
-        // 提取原有路径数据
-        List<List<Vector2>> originalPaths = new List<List<Vector2>>(polyCollider.pathCount);
-        for (int i = 0; i < polyCollider.pathCount; i++)
-        {
-            originalPaths.Add(new List<Vector2>(polyCollider.GetPath(i)));
         }
 
         // 确保环的绕序为顺时针（作为孔洞）
@@ -210,6 +267,13 @@ public static class Slicer
             Vector2 p2 = localLoop[(i + 1) % localLoop.Count];
             loopArea += (p1.x * p2.y) - (p2.x * p1.y);
         }
+
+        // 面积太小的碎屑洞直接熔毁，不进行物理与合并计算，防止三角剖分崩溃
+        if (Mathf.Abs(loopArea / 2f) < 0.001f)
+        {
+            return;
+        }
+
         if (loopArea > 0) localLoop.Reverse(); // 如果是逆时针，翻转为顺时针
 
         // 构造母体碎片（带上新孔洞）

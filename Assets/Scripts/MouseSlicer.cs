@@ -203,25 +203,19 @@ public class MouseSlicer : MonoBehaviour
         // Step 3: 自交检测与回路提取
         bool isSelfIntersecting = SlicerMath.DetectAndResolveSelfIntersection(simplified, out List<Vector2> extractedLoop);
 
-        if (isSelfIntersecting && extractedLoop != null)
-        {
-            // 发现自交回路——走内部挖孔逻辑
-            Debug.Log($"[曲线切割] 检测到自交回路，提取为闭合环 ({extractedLoop.Count} 点)");
-            PerformHolePunch(extractedLoop);
-            return;
-        }
-
         // Step 4: 检查首尾是否自然闭合（玩家慢慢画了一个圈）
-        if (SlicerMath.IsClosedLoop(simplified))
+        bool isNaturallyClosed = SlicerMath.IsClosedLoop(simplified);
+        bool isClosed = isSelfIntersecting || isNaturallyClosed;
+
+        // [临时补丁] 暂时禁止任何闭合环的切割逻辑
+        // TODO: 等待分析复杂曲面（自交、桥重叠等）的报错原因后，再重新开放
+        if (isClosed)
         {
-            // 闭合路径——走内部挖孔逻辑
-            Debug.Log($"[曲线切割] 检测到闭合轨迹，走挖孔路径 ({simplified.Count} 点)");
-            PerformHolePunch(simplified);
+            Debug.LogWarning("[曲线切割] 检测到闭合回路，该功能由于存在复杂的拓扑退化 Bug，已被暂时禁用以待修缮！");
             return;
         }
 
-        // Step 5: 非闭合曲线——走"曲线贯穿切割"逻辑
-        Debug.Log($"[曲线切割] 提交曲线贯穿切割 ({simplified.Count} 点)");
+        Debug.Log($"[曲线切割] 提交统一贯穿切割 ({simplified.Count} 点, 闭合: {isClosed})");
 
         // 转回 Vector3 用于物理检测和 Slicer 接口
         List<Vector3> worldPath = new List<Vector3>(simplified.Count);
@@ -230,40 +224,31 @@ public class MouseSlicer : MonoBehaviour
             worldPath.Add(new Vector3(simplified[i].x, simplified[i].y, -1f));
         }
 
-        // 使用 OverlapArea 或沿折线进行多段碰撞来检测哪些物体被曲线穿越
-        PerformCurveSliceOnTargets(worldPath);
-    }
-
-    /// <summary>
-    /// 挖孔逻辑：将闭合环作为新孔洞直接注入被切割物体。
-    /// </summary>
-    private void PerformHolePunch(List<Vector2> closedLoop)
-    {
-        // 通过环上的中心点寻找目标物体
-        Vector2 centroid = Vector2.zero;
-        for (int i = 0; i < closedLoop.Count; i++)
-            centroid += closedLoop[i];
-        centroid /= closedLoop.Count;
-
-        contactFilter.SetLayerMask(sliceableLayer);
-        Collider2D hit = Physics2D.OverlapPoint(centroid, contactFilter.layerMask);
-
-        if (hit == null)
-        {
-            Debug.Log("[曲线切割] 挖孔环的中心点未命中任何可切割物体");
-            return;
-        }
-
-        Slicer.HolePunch(hit.gameObject, closedLoop);
+        // 使用沿折线的多段碰撞（以及闭环中心点）来探测物体
+        PerformCurveSliceOnTargets(worldPath, isClosed);
     }
 
     /// <summary>
     /// 曲线贯穿切割：对沿曲线扫掠到的物体执行多段线切割。
     /// </summary>
-    private void PerformCurveSliceOnTargets(List<Vector3> worldPath)
+    private void PerformCurveSliceOnTargets(List<Vector3> worldPath, bool isClosed)
     {
         contactFilter.SetLayerMask(sliceableLayer);
         HashSet<GameObject> processedObjects = new HashSet<GameObject>();
+
+        // 对于闭合曲线，额外使用闭包质心检测，防止完全包进多边形内部时可能因 Linecast 原理导致的漏检
+        if (isClosed)
+        {
+            Vector2 centroid = Vector2.zero;
+            for (int i = 0; i < worldPath.Count; i++) centroid += new Vector2(worldPath[i].x, worldPath[i].y);
+            centroid /= worldPath.Count;
+            
+            Collider2D[] overlaps = Physics2D.OverlapPointAll(centroid, contactFilter.layerMask);
+            foreach (var hit in overlaps)
+            {
+                if (hit != null) processedObjects.Add(hit.gameObject);
+            }
+        }
 
         // 沿折线的每一小段做 Linecast，收集所有命中物体
         for (int i = 0; i < worldPath.Count - 1; i++)
@@ -277,11 +262,11 @@ public class MouseSlicer : MonoBehaviour
             }
         }
 
-        // 对收集到的每一个物体，执行曲线切割
+        // 对收集到的每一个物体，执行统一曲线切割（内部自动进行虚空自旋和布尔路由）
         foreach (GameObject target in processedObjects)
         {
             if (target == null) continue;
-            Slicer.CurveSlice(target, worldPath);
+            Slicer.CurveSlice(target, worldPath, isClosed);
         }
     }
 }
