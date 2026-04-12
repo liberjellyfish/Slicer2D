@@ -25,7 +25,7 @@ public static class Triangulator
     {
         public Vector2 Position;
         public int Index;        // 原始索引
-        
+
         public int Prev;         // 指向 NativeArray 的伪指针
         public int Next;         // 指向 NativeArray 的伪指针
         public int NextInGrid;   // 栅格空间链表寻址
@@ -164,7 +164,7 @@ public static class Triangulator
 
             // 1. 构建完全扁平化的链表阵列
             NativeArray<NativeVertexNode> nodes = new NativeArray<NativeVertexNode>(n, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
-            
+
             for (int i = 0; i < n; i++)
             {
                 nodes[i] = new NativeVertexNode
@@ -236,7 +236,7 @@ public static class Triangulator
                 // [O(1) Pop末端] 即时裁剪无需 GC 整理
                 int lastIdx = earCandidates.Length - 1;
                 int candidateIdx = earCandidates[lastIdx];
-                earCandidates.Length = lastIdx; 
+                earCandidates.Length = lastIdx;
 
                 NativeVertexNode candidate = nodes[candidateIdx];
                 candidate.IsCandidate = false;
@@ -248,9 +248,10 @@ public static class Triangulator
                     int prevIdx = candidate.Prev;
                     int nextIdx = candidate.Next;
 
+
                     Triangles.Add(nodes[prevIdx].Index);
-                    Triangles.Add(candidate.Index);
-                    Triangles.Add(nodes[nextIdx].Index);
+                    Triangles.Add(nodes[nextIdx].Index); // 与上一行互换位置
+                    Triangles.Add(candidate.Index);      // 与上一行互换位置
 
                     NativeVertexNode prev = nodes[prevIdx];
                     NativeVertexNode next = nodes[nextIdx];
@@ -277,8 +278,8 @@ public static class Triangulator
                 int n3 = nodes[n2].Next;
 
                 Triangles.Add(nodes[n1].Index);
-                Triangles.Add(nodes[n2].Index);
                 Triangles.Add(nodes[n3].Index);
+                Triangles.Add(nodes[n2].Index);
             }
 
             // 释放堆栈内存池
@@ -304,7 +305,7 @@ public static class Triangulator
                 if (!node.IsCandidate)
                 {
                     node.IsCandidate = true;
-                    candidates.Add(nodeIdx); 
+                    candidates.Add(nodeIdx);
                 }
             }
             nodes[nodeIdx] = node;
@@ -353,7 +354,7 @@ public static class Triangulator
                     while (currIdx != -1)
                     {
                         NativeVertexNode node = nodes[currIdx];
-                        
+
                         if (currIdx == v.Prev || currIdx == v.Next)
                         {
                             currIdx = node.NextInGrid;

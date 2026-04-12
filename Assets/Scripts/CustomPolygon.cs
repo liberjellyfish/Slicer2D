@@ -108,11 +108,23 @@ public class CustomPolygon : MonoBehaviour
         Vector2[] uvs = new Vector2[mergedPoints.Count];
         Vector2[] points2D = new Vector2[mergedPoints.Count];
 
+        float minX = float.MaxValue, minY = float.MaxValue;
+        float maxX = float.MinValue, maxY = float.MinValue;
+        foreach (var p in mergedPoints)
+        {
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.y > maxY) maxY = p.y;
+        }
+        float width = maxX - minX; if (width < 0.0001f) width = 1;
+        float height = maxY - minY; if (height < 0.0001f) height = 1;
+
         for (int i = 0; i < mergedPoints.Count; i++)
         {
             vertices[i] = new Vector3(mergedPoints[i].x, mergedPoints[i].y, 0);
-            // 简单的 UV 映射，基于坐标归一化
-            uvs[i] = new Vector2((mergedPoints[i].x + 3) / 6f, (mergedPoints[i].y + 3) / 6f);
+            // 首次生成即使用与 Slicer 相同的严格外框裁切法，彻底消灭偏移差！
+            uvs[i] = new Vector2((mergedPoints[i].x - minX) / width, (mergedPoints[i].y - minY) / height);
             points2D[i] = mergedPoints[i];
         }
 
