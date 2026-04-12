@@ -8,10 +8,11 @@ public class CustomPolygon : MonoBehaviour
     // 定义外圈 (逆时针) - 大正方形
     private List<Vector2> outerLoop = new List<Vector2>()
     {
-        new Vector2(-3, -3),
-        new Vector2(3, -3),
-        new Vector2(3, 3),
-        new Vector2(-3, 3)
+        new Vector2(-3+0.5f, -3),
+        new Vector2(3+0.5f, -3),
+        new Vector2(1+0.5f, 0),
+        new Vector2(3+0.5f, 3),
+        new Vector2(-3+0.5f, 3)
     };
 
     // 定义四个内圈 (顺时针 - 洞)
@@ -50,6 +51,13 @@ public class CustomPolygon : MonoBehaviour
         new Vector2(2, -2),
         new Vector2(1, -2)
     };
+    private List<Vector2> holeMID = new List<Vector2>()
+    {
+        new Vector2(-1.5f, 0),
+        new Vector2(0.5f, 1.5f),
+        new Vector2(0, 0),
+        new Vector2(0.5f, -1.5f)
+    };
 
     void OnEnable()
     {
@@ -60,7 +68,7 @@ public class CustomPolygon : MonoBehaviour
     void GenerateMesh()
     {
         // 1. 准备数据
-        List<List<Vector2>> holes = new List<List<Vector2>> { holeTL, holeTR, holeBL, holeBR };
+        List<List<Vector2>> holes = new List<List<Vector2>> { holeTL, holeTR, holeBL, holeBR, holeMID };
 
         // 2. 调用造桥算法，将所有洞融合进外圈
         List<Vector2> mergedPoints = PolygonHoleMerger.Merge(outerLoop, holes);

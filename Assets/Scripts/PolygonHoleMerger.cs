@@ -134,21 +134,23 @@ public class PolygonHoleMerger
         do
         {
             Vector2 P = curr.Position;
+            float distSq = (P - M).sqrMagnitude;
 
-            // 1. 几何方向剪枝：只找右侧点 (配合 MaxX 策略)
-            if (P.x > M.x)
+            // 1. 几何方向剪枝 (全向降级策略)：首选右侧点(MaxX策略)，如果该点在左侧，给予100万极大惩罚距离。
+            // 确保平时绝不跨越孔洞向左建桥，但在极致边缘(右侧唯一合法点被霸占)时，允许向后突围！
+            if (P.x <= M.x)
             {
-                float distSq = (P - M).sqrMagnitude;
+                distSq += 1000000f; // Soft fallback penalty for left-sided points
+            }
 
-                // 2. 距离剪枝
-                if (distSq < minDistSq)
+            // 2. 距离剪枝
+            if (distSq < minDistSq)
+            {
+                // 3. 昂贵的可见性验证 (Query Tree)
+                if (IsBridgeValid(M, P, tree, bridges))
                 {
-                    // 3. 昂贵的可见性验证 (Query Tree)
-                    if (IsBridgeValid(M, P, tree, bridges))
-                    {
-                        minDistSq = distSq;
-                        bestNode = curr;
-                    }
+                    minDistSq = distSq;
+                    bestNode = curr;
                 }
             }
             curr = curr.Next;
@@ -170,9 +172,9 @@ public class PolygonHoleMerger
         for (int i = 0; i < bridgeCount; i++)
         {
             BridgeSegment b = bridges[i];
-            // 排除共享顶点
+            // 排除共享顶点引发拓扑绞杀：严格禁止多桥叠加于同一点，违者零容忍直接返还 false 断路。
             if (IsSamePoint(start, b.A) || IsSamePoint(start, b.B) ||
-                IsSamePoint(end, b.A) || IsSamePoint(end, b.B)) continue;
+                IsSamePoint(end, b.A) || IsSamePoint(end, b.B)) return false;
 
             if (SegmentsIntersect(start, end, b.A, b.B)) return false;
         }
