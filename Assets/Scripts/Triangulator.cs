@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Burst;
+using Unity.Mathematics;
 
 /// <summary>
 /// 高性能原生三角剖分器 (Native & Grid-Accelerated Ear Clipping)
@@ -64,20 +65,20 @@ public static class Triangulator
             if (height < 0.001f) height = 0.001f;
 
             float area = width * height;
-            float cellSize = Mathf.Sqrt(area / (count + 1));
+            float cellSize = math.sqrt(area / (count + 1));
             if (cellSize < 0.0001f) cellSize = 0.0001f;
 
             this.InvCellSize = 1.0f / cellSize;
-            this.Cols = Mathf.CeilToInt(width * InvCellSize) + 1;
-            this.Rows = Mathf.CeilToInt(height * InvCellSize) + 1;
+            this.Cols = (int)math.ceil(width * InvCellSize) + 1;
+            this.Rows = (int)math.ceil(height * InvCellSize) + 1;
 
             if (Cols * Rows > 200000)
             {
-                float ratio = Mathf.Sqrt(200000f / (Cols * Rows));
+                float ratio = math.sqrt(200000f / (Cols * Rows));
                 cellSize /= ratio;
                 this.InvCellSize = 1.0f / cellSize;
-                this.Cols = Mathf.CeilToInt(width * InvCellSize) + 1;
-                this.Rows = Mathf.CeilToInt(height * InvCellSize) + 1;
+                this.Cols = (int)math.ceil(width * InvCellSize) + 1;
+                this.Rows = (int)math.ceil(height * InvCellSize) + 1;
             }
 
             int length = Cols * Rows;

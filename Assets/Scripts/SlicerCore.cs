@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Burst;
+using Unity.Mathematics;
 using System.Diagnostics;
 
 // 这是一个纯静态的计算核心，不依赖 GameObject 实例化
@@ -208,18 +209,41 @@ public static class SlicerCore
             CutHitResult res = new CutHitResult();
             res.Hit = false;
 
-            float d = (p2.x - p1.x) * (SliceEnd.y - SliceStart.y) - (p2.y - p1.y) * (SliceEnd.x - SliceStart.x);
-            if (UnityEngine.Mathf.Abs(d) >= 1e-6f)
+            // 切线作为基准分隔平面
+            Vector2 dir = SliceEnd - SliceStart;
+            float lenSq = dir.x * dir.x + dir.y * dir.y;
+            if (lenSq < 1e-8f)
             {
-                float u = ((SliceStart.x - p1.x) * (SliceEnd.y - SliceStart.y) - (SliceStart.y - p1.y) * (SliceEnd.x - SliceStart.x)) / d;
-                float v = ((SliceStart.x - p1.x) * (p2.y - p1.y) - (SliceStart.y - p1.y) * (p2.x - p1.x)) / d;
+                Results[index] = res;
+                return;
+            }
 
-                if (u >= -1e-4f && u <= 1.0001f && v >= -1e-4f && v <= 1.0001f)
+            Vector2 normal = new Vector2(-dir.y, dir.x);
+
+            // 求符号距离，大于 0 为超平面左方阵营，小于 0 为右方阵营
+            float dist1 = math.dot(normal, p1 - SliceStart);
+            float dist2 = math.dot(normal, p2 - SliceStart);
+
+            // 将绝对距离挤压为绝对符号。> 0 和 <= 0 是极其核心的排爆墙！
+            // 它强行规定哪怕正好摩擦在刀口（dist == 0），也会被强制分配到右侧阵营(-1)
+            // 如此这般，相邻的两条边产生同擦点时，只有一条边能触发“跨域”，保证只输出 1 个且唯一 1 个合法交点。
+            int sign1 = dist1 > 0f ? 1 : -1;
+            int sign2 = dist2 > 0f ? 1 : -1;
+
+            if (sign1 != sign2)
+            {
+                // 等比计算交点
+                float u = dist1 / (dist1 - dist2);
+                Vector2 intersection = p1 + u * (p2 - p1);
+
+                // 将该交点投影在切割线上的绝对长度进度 T (用于极速排序)
+                float t = math.dot(intersection - SliceStart, dir) / lenSq;
+
+                if (t >= -1e-5f && t <= 1f + 1e-5f)
                 {
                     res.Hit = true;
-                    // 使用 Mathf 来保持独立性，Burst 支持转换为底层指令
-                    res.T = UnityEngine.Mathf.Clamp01(v);
-                    res.Point = p1 + UnityEngine.Mathf.Clamp01(u) * (p2 - p1);
+                    res.T = t;
+                    res.Point = intersection;
                 }
             }
             Results[index] = res;
@@ -331,7 +355,13 @@ public static class SlicerCore
                     while (hitIndex < context.TempHits.Count && context.TempHits[hitIndex].SegmentIndex == i)
                     {
                         Vector2 p = context.TempHits[hitIndex].Point;
-                        if (SqrDist(newPathVertices[newPathVertices.Count - 1], p) > MIN_VERT_DIST_SQ)
+                        if (SqrDist(newPathVertices[newPathVertices.Count - 1], p) <= MIN_VERT_DIST_SQ)
+                        {
+                            // 物理极度靠近时，拒绝在边界中插入 0 长度废点
+                            // 但是【必须】将已经存在边界中的这个顶点作为相交点输入到偶数队列中！
+                            cutIntersections.Add(newPathVertices[newPathVertices.Count - 1]);
+                        }
+                        else
                         {
                             newPathVertices.Add(p);
                             cutIntersections.Add(p);
@@ -359,18 +389,9 @@ public static class SlicerCore
         }
 
         // --- Phase 2: 处理切割缝 ---
-        // 去重
-        for (int i = cutIntersections.Count - 1; i >= 0; i--)
-        {
-            for (int j = 0; j < i; j++)
-            {
-                if (SqrDist(cutIntersections[i], cutIntersections[j]) < MIN_VERT_DIST_SQ)
-                {
-                    cutIntersections.RemoveAt(i);
-                    break;
-                }
-            }
-        }
+        // (注：已彻底废弃导致吞噬真实点的暴力嵌套去重 RemoveAt 逻辑)
+        // 奇偶性算法升级为 SDF 面判定法后，所有的进入/穿出点将百分百守恒
+
 
         if (cutIntersections.Count < 2) return null;
 
@@ -595,18 +616,27 @@ public static class SlicerCore
     private static bool GetLineIntersection(Vector2 p1, Vector2 p2, Vector2 p3, Vector2 p4, out Vector2 intersection, out float t)
     {
         intersection = Vector2.zero;
-        t = 0;
-        float d = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x);
-        if (Mathf.Abs(d) < 1e-6f) return false;
+        t = 0f;
 
-        float u = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / d;
-        float v = ((p3.x - p1.x) * (p2.y - p1.y) - (p3.y - p1.y) * (p2.x - p1.x)) / d;
+        Vector2 dir = p4 - p3;
+        float lenSq = dir.x * dir.x + dir.y * dir.y;
+        if (lenSq < 1e-8f) return false;
 
-        if (u >= -1e-4f && u <= 1.0001f && v >= -1e-4f && v <= 1.0001f)
+        Vector2 normal = new Vector2(-dir.y, dir.x);
+
+        float dist1 = Vector2.Dot(normal, p1 - p3);
+        float dist2 = Vector2.Dot(normal, p2 - p3);
+
+        int sign1 = dist1 > 0f ? 1 : -1;
+        int sign2 = dist2 > 0f ? 1 : -1;
+
+        if (sign1 != sign2)
         {
-            t = Mathf.Clamp01(v);
-            intersection = p1 + Mathf.Clamp01(u) * (p2 - p1);
-            return true;
+            float u = dist1 / (dist1 - dist2);
+            intersection = p1 + u * (p2 - p1);
+            t = Vector2.Dot(intersection - p3, dir) / lenSq;
+
+            if (t >= -1e-5f && t <= 1f + 1e-5f) return true;
         }
         return false;
     }

@@ -89,8 +89,8 @@ public struct NativeAABBTree : IDisposable
         }
 
         // 分配物理内存池 (单帧结束前必须 Dispose)
-        segments = new NativeArray<Segment>(totalEdges, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
-        nodes = new NativeArray<FlatNode>(totalEdges * 2, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
+        segments = new NativeArray<Segment>(totalEdges, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        nodes = new NativeArray<FlatNode>(totalEdges * 2, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
 
         // 2. 填充线段数组 (此时是乱序的)
         int ptr = 0;

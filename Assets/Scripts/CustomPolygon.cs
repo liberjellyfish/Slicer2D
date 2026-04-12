@@ -79,20 +79,21 @@ public class CustomPolygon : MonoBehaviour
         {
             activeOuterLoop.Clear();
             activeHoles.Clear();
-
+            int outLoopCount = 200;
+            int innerLoopCount = 70;
             // 生成一个半径为 2.8 的大圆外圈 (100 条边)
-            for (int i = 0; i < 100; i++)
+            for (int i = 0; i < outLoopCount; i++)
             {
-                float angle = i * Mathf.PI * 2f / 100f;
+                float angle = i * Mathf.PI * 2f / (outLoopCount * 1.0f);
                 // 逆时针
                 activeOuterLoop.Add(new Vector2(Mathf.Cos(angle) * 2.8f, Mathf.Sin(angle) * 2.8f));
             }
 
             // 生成一个内圈 (35 条边) => 总边数 135 > 128
             List<Vector2> giantHole = new List<Vector2>();
-            for (int i = 0; i < 35; i++)
+            for (int i = 0; i < innerLoopCount; i++)
             {
-                float angle = i * Mathf.PI * 2f / 35f;
+                float angle = i * Mathf.PI * 2f / (innerLoopCount * 1.0f);
                 // 顺时针
                 giantHole.Add(new Vector2(Mathf.Cos(-angle) * 1.5f, Mathf.Sin(-angle) * 1.5f));
             }
