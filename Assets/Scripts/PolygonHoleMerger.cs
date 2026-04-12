@@ -1,5 +1,8 @@
 using UnityEngine;
 using System.Collections.Generic;
+using Unity.Collections;
+using Unity.Jobs;
+using Unity.Burst;
 
 /// <summary>
 /// 多边形空洞合并器 (Optimized Hole Merger)
@@ -32,7 +35,7 @@ public class PolygonHoleMerger
     }
 
     // 动态生成的"桥"记录
-    private struct BridgeSegment
+    public struct BridgeSegment
     {
         public Vector2 A;
         public Vector2 B;
@@ -61,62 +64,62 @@ public class PolygonHoleMerger
 
             // 3. 预处理孔洞
             List<HoleData> holeDatas = new List<HoleData>(holes.Count);
-        for (int i = 0; i < holes.Count; i++)
-        {
-            var holePoints = holes[i];
-            if (holePoints.Count < 3) continue;
-
-            ListNode head = CreateLoop(holePoints);
-
-            // 寻找 X 坐标最大的点 (MaxX)
-            // 策略：往最右边搭桥，通常被阻挡的概率最小
-            ListNode curr = head;
-            ListNode maxNode = head;
-            float maxX = -float.MaxValue;
-            int count = 0;
-            do
+            for (int i = 0; i < holes.Count; i++)
             {
-                if (curr.Position.x > maxX)
+                var holePoints = holes[i];
+                if (holePoints.Count < 3) continue;
+
+                ListNode head = CreateLoop(holePoints);
+
+                // 寻找 X 坐标最大的点 (MaxX)
+                // 策略：往最右边搭桥，通常被阻挡的概率最小
+                ListNode curr = head;
+                ListNode maxNode = head;
+                float maxX = -float.MaxValue;
+                int count = 0;
+                do
                 {
-                    maxX = curr.Position.x;
-                    maxNode = curr;
+                    if (curr.Position.x > maxX)
+                    {
+                        maxX = curr.Position.x;
+                        maxNode = curr;
+                    }
+                    curr = curr.Next;
+                    count++;
+                } while (curr != head);
+
+                holeDatas.Add(new HoleData { Head = head, Count = count, MaxX = maxX, MaxXNode = maxNode });
+            }
+
+            // 4. 排序：优先处理最右边的洞 (O(H log H))
+            holeDatas.Sort((a, b) => b.MaxX.CompareTo(a.MaxX));
+
+            List<BridgeSegment> dynamicBridges = new List<BridgeSegment>(holes.Count);
+
+            // 5. 逐个合并
+            foreach (var hole in holeDatas)
+            {
+                Vector2 M = hole.MaxXNode.Position;
+
+                // 寻找最佳连接点 P (O(N_outer * log N_total))
+                ListNode bestP = FindBestBridgePoint(M, outerHead, staticWallTree, dynamicBridges);
+
+                if (bestP != null)
+                {
+                    Vector2 P = bestP.Position;
+                    // 记录新桥，防止后续的洞穿过这条线
+                    dynamicBridges.Add(new BridgeSegment { A = M, B = P });
+
+                    // 执行指针缝合 (Surgery)
+                    StitchLists(bestP, hole.MaxXNode);
                 }
-                curr = curr.Next;
-                count++;
-            } while (curr != head);
-
-            holeDatas.Add(new HoleData { Head = head, Count = count, MaxX = maxX, MaxXNode = maxNode });
-        }
-
-        // 4. 排序：优先处理最右边的洞 (O(H log H))
-        holeDatas.Sort((a, b) => b.MaxX.CompareTo(a.MaxX));
-
-        List<BridgeSegment> dynamicBridges = new List<BridgeSegment>(holes.Count);
-
-        // 5. 逐个合并
-        foreach (var hole in holeDatas)
-        {
-            Vector2 M = hole.MaxXNode.Position;
-
-            // 寻找最佳连接点 P (O(N_outer * log N_total))
-            ListNode bestP = FindBestBridgePoint(M, outerHead, staticWallTree, dynamicBridges);
-
-            if (bestP != null)
-            {
-                Vector2 P = bestP.Position;
-                // 记录新桥，防止后续的洞穿过这条线
-                dynamicBridges.Add(new BridgeSegment { A = M, B = P });
-
-                // 执行指针缝合 (Surgery)
-                StitchLists(bestP, hole.MaxXNode);
+                else
+                {
+                    Debug.LogWarning($"[PolygonHoleMerger] 无法为孔洞找到合法的桥! M点: {M}");
+                }
             }
-            else
-            {
-                Debug.LogWarning($"[PolygonHoleMerger] 无法为孔洞找到合法的桥! M点: {M}");
-            }
-        }
 
-        // 6. 还原为 List (O(N))
+            // 6. 还原为 List (O(N))
             return FlattenList(outerHead);
         }
         finally
@@ -134,6 +137,91 @@ public class PolygonHoleMerger
         NativeAABBTree tree,
         List<BridgeSegment> bridges)
     {
+        // 1. 统计外圈候选项数量
+        int pointCount = 0;
+        ListNode curr = outerLoop;
+        do
+        {
+            pointCount++;
+            curr = curr.Next;
+        } while (curr != outerLoop);
+
+        // 2. 如果候选点极少，采用传统单核循环，避免调度税
+        if (pointCount <= 128)
+        {
+            return FindBestBridgePointSequential(M, outerLoop, tree, bridges);
+        }
+
+        // 3. 触发 Job-System (超过 128 个候选项的大型并发查路)
+        // UnityEngine.Debug.Log($"[PolygonHoleMerger] 触发超级寻桥 Job！测试点数: {pointCount}");
+
+        NativeArray<Vector2> candidates = new NativeArray<Vector2>(pointCount, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        NativeArray<float> distances = new NativeArray<float>(pointCount, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        NativeArray<BridgeSegment> dynamicBridges = new NativeArray<BridgeSegment>(bridges.Count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+
+        try
+        {
+            curr = outerLoop;
+            for (int i = 0; i < pointCount; i++)
+            {
+                candidates[i] = curr.Position;
+                curr = curr.Next;
+            }
+
+            for (int i = 0; i < bridges.Count; i++)
+            {
+                dynamicBridges[i] = bridges[i];
+            }
+
+            BridgeScanJob job = new BridgeScanJob
+            {
+                M = M,
+                Points = candidates,
+                Tree = tree,
+                Bridges = dynamicBridges,
+                OutputDistances = distances
+            };
+
+            // 分发任务：每批 32 个点为一条执行线程
+            job.Schedule(pointCount, 32).Complete();
+
+            // 搜寻最优解
+            float minDist = float.MaxValue;
+            int bestIndex = -1;
+
+            for (int i = 0; i < pointCount; i++)
+            {
+                if (distances[i] < minDist)
+                {
+                    minDist = distances[i];
+                    bestIndex = i;
+                }
+            }
+
+            if (bestIndex == -1) return null;
+
+            // 映射回链表节点
+            ListNode bestNode = outerLoop;
+            for (int i = 0; i < bestIndex; i++)
+            {
+                bestNode = bestNode.Next;
+            }
+            return bestNode;
+        }
+        finally
+        {
+            candidates.Dispose();
+            distances.Dispose();
+            dynamicBridges.Dispose();
+        }
+    }
+
+    private static ListNode FindBestBridgePointSequential(
+        Vector2 M,
+        ListNode outerLoop,
+        NativeAABBTree tree,
+        List<BridgeSegment> bridges)
+    {
         ListNode bestNode = null;
         float minDistSq = float.MaxValue;
 
@@ -143,17 +231,16 @@ public class PolygonHoleMerger
             Vector2 P = curr.Position;
             float distSq = (P - M).sqrMagnitude;
 
-            // 1. 几何方向剪枝 (全向降级策略)：首选右侧点(MaxX策略)，如果该点在左侧，给予100万极大惩罚距离。
-            // 确保平时绝不跨越孔洞向左建桥，但在极致边缘(右侧唯一合法点被霸占)时，允许向后突围！
+            // 1. 几何方向剪枝 
             if (P.x <= M.x)
             {
-                distSq += 1000000f; // Soft fallback penalty for left-sided points
+                distSq += 1000000f;
             }
 
             // 2. 距离剪枝
             if (distSq < minDistSq)
             {
-                // 3. 昂贵的可见性验证 (Query Tree)
+                // 3. 可见性验证
                 if (IsBridgeValid(M, P, tree, bridges))
                 {
                     minDistSq = distSq;
@@ -299,5 +386,70 @@ public class PolygonHoleMerger
         float u = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / den;
         float v = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / den;
         return (u > 1e-5f && u < 1f - 1e-5f && v > 1e-5f && v < 1f - 1e-5f);
+    }
+
+    [BurstCompile(CompileSynchronously = true, FloatMode = FloatMode.Fast)]
+    public struct BridgeScanJob : IJobParallelFor
+    {
+        public Vector2 M;
+        [ReadOnly] public NativeArray<Vector2> Points;
+        [ReadOnly] public NativeAABBTree Tree;
+        [ReadOnly] public NativeArray<BridgeSegment> Bridges;
+
+        [WriteOnly] public NativeArray<float> OutputDistances;
+
+        public void Execute(int index)
+        {
+            Vector2 P = Points[index];
+            float distSq = (P - M).sqrMagnitude;
+
+            if (P.x <= M.x)
+            {
+                distSq += 1000000f; // Soft fallback penalty
+            }
+
+            // 检查静态树拦截
+            if (Tree.Intersects(M, P))
+            {
+                OutputDistances[index] = float.MaxValue;
+                return;
+            }
+
+            // 检查动态生成的桥拦截
+            for (int i = 0; i < Bridges.Length; i++)
+            {
+                BridgeSegment b = Bridges[i];
+                if (IsSamePoint(M, b.A) || IsSamePoint(M, b.B) ||
+                    IsSamePoint(P, b.A) || IsSamePoint(P, b.B))
+                {
+                    OutputDistances[index] = float.MaxValue;
+                    return;
+                }
+
+                if (SegmentsIntersect(M, P, b.A, b.B))
+                {
+                    OutputDistances[index] = float.MaxValue;
+                    return;
+                }
+            }
+
+            OutputDistances[index] = distSq;
+        }
+
+        private static bool IsSamePoint(Vector2 a, Vector2 b)
+        {
+            float dx = a.x - b.x;
+            float dy = a.y - b.y;
+            return (dx * dx + dy * dy) < 1e-7f;
+        }
+
+        private static bool SegmentsIntersect(Vector2 a, Vector2 b, Vector2 c, Vector2 d)
+        {
+            float den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
+            if (den == 0) return false;
+            float u = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / den;
+            float v = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / den;
+            return (u > 1e-5f && u < 1f - 1e-5f && v > 1e-5f && v < 1f - 1e-5f);
+        }
     }
 }
