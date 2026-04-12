@@ -2,21 +2,21 @@ using System;
 using UnityEngine;
 
 public class MouseSlicer : MonoBehaviour
-{ 
+{
 
-    //ÆğµãÖÕµã×ø±ê
+    //èµ·ç‚¹ç»ˆç‚¹åæ ‡
     private Vector3 startPoint;
     private Vector3 endPoint;
 
-    //µ±Ç°ÊÇ·ñÔÚÍÏ×§Êó±ê
+    //å½“å‰æ˜¯å¦åœ¨æ‹–æ‹½é¼ æ ‡
     private bool isDragging = false;
 
-    //ÒıÓÃ×é¼ş»æÖÆ¿É¼ûºìÏß
+    //å¼•ç”¨ç»„ä»¶ç»˜åˆ¶å¯è§çº¢çº¿
     private LineRenderer lineVisualizer;
 
-    public LayerMask sliceableLayer;//²ã¼¶ÕÚÕÖ£¬Ö»¼ì²â´Ë²ã¼¶
+    public LayerMask sliceableLayer;//å±‚çº§é®ç½©ï¼Œåªæ£€æµ‹æ­¤å±‚çº§
 
-    //Ô¤·ÖÅäÉäÏß¼ì²â½á¹ûÊı×é¡£±ÜÃâGC
+    //é¢„åˆ†é…å°„çº¿æ£€æµ‹ç»“æœæ•°ç»„ã€‚é¿å…GC
     private RaycastHit2D[] hitResults = new RaycastHit2D[16];
 
     private ContactFilter2D contactFilter;
@@ -24,27 +24,27 @@ public class MouseSlicer : MonoBehaviour
     void Start()
     {
         lineVisualizer = GetComponent<LineRenderer>();
-        lineVisualizer.positionCount = 2;//ÆğµãÖÕµã
-        lineVisualizer.enabled = false;//³õÊ¼½ûÓÃäÖÈ¾
+        lineVisualizer.positionCount = 2;//èµ·ç‚¹ç»ˆç‚¹
+        lineVisualizer.enabled = false;//åˆå§‹ç¦ç”¨æ¸²æŸ“
 
-        lineVisualizer.startWidth = 0.05f;//ÏŞÖÆÏßÌõ¿í¶È
+        lineVisualizer.startWidth = 0.05f;//é™åˆ¶çº¿æ¡å®½åº¦
         lineVisualizer.endWidth = 0.05f;
     }
 
     void Update()
     {
-        //Êó±ê°´ÏÂ
-        if(Input.GetMouseButtonDown(0))
+        //é¼ æ ‡æŒ‰ä¸‹
+        if (Input.GetMouseButtonDown(0))
         {
             startPoint = GetWorldMousePosition();
             isDragging = true;
             lineVisualizer.enabled = true;
-            //¸Õ°´ÏÂÊ±ÆğµãÖÕµãÖØºÏ
+            //åˆšæŒ‰ä¸‹æ—¶èµ·ç‚¹ç»ˆç‚¹é‡åˆ
             lineVisualizer.SetPosition(0, startPoint);
             lineVisualizer.SetPosition(1, startPoint);
         }
 
-        //Êó±êÍÏ×§ÖĞ
+        //é¼ æ ‡æ‹–æ‹½ä¸­
         if (isDragging && Input.GetMouseButton(0))
         {
             endPoint = GetWorldMousePosition();
@@ -52,16 +52,16 @@ public class MouseSlicer : MonoBehaviour
             lineVisualizer.SetPosition(1, endPoint);
         }
 
-        if(isDragging && Input.GetMouseButtonUp(0))
+        if (isDragging && Input.GetMouseButtonUp(0))
         {
             isDragging = false;
-            lineVisualizer.enabled = false; 
+            lineVisualizer.enabled = false;
             endPoint = GetWorldMousePosition();
 
             PerformSlice(startPoint, endPoint);
         }
     }
-    //½«Êó±êµÄÆÁÄ»×ø±ê(ÏñËØ)×ª»»ÎªÊÀ½ç×ø±ê
+    //å°†é¼ æ ‡çš„å±å¹•åæ ‡(åƒç´ )è½¬æ¢ä¸ºä¸–ç•Œåæ ‡
     private Vector3 GetWorldMousePosition()
     {
         Vector3 screenPosition = Input.mousePosition;
@@ -71,43 +71,43 @@ public class MouseSlicer : MonoBehaviour
         screenPosition.z = distanceToCamera;
 
 
-        Vector3 worldPos =  Camera.main.ScreenToWorldPoint(screenPosition);
+        Vector3 worldPos = Camera.main.ScreenToWorldPoint(screenPosition);
 
         worldPos.z = -1f;
 
         return worldPos;
     }
 
-    private void PerformSlice(Vector3 slicerStart,Vector3 slicerEnd)
+    private void PerformSlice(Vector3 slicerStart, Vector3 slicerEnd)
     {
-        //Èç¹ûÌ«¶Ì²»ÇĞ¸î
-        if (Vector3.Distance(slicerStart, slicerEnd) < 0.1f) 
+        //å¦‚æœå¤ªçŸ­ä¸åˆ‡å‰²
+        if (Vector3.Distance(slicerStart, slicerEnd) < 0.1f)
         {
             return;
         }
-        Debug.Log($"[ÇĞ¸îÖ¸Áî] Start: {slicerStart} -> End: {slicerEnd}");
+        Debug.Log($"[åˆ‡å‰²æŒ‡ä»¤] Start: {slicerStart} -> End: {slicerEnd}");
 
         contactFilter.SetLayerMask(sliceableLayer);
 
-        int hitCount = Physics2D.Linecast(slicerStart, slicerEnd, contactFilter,hitResults);
+        int hitCount = Physics2D.Linecast(slicerStart, slicerEnd, contactFilter, hitResults);
 
-        Debug.Log($"[MouseSlicer] ÕâÒ»µ¶ÇĞµ½ÁË {hitCount} ¸öÎïÌå");
+        Debug.Log($"[MouseSlicer] è¿™ä¸€åˆ€åˆ‡åˆ°äº† {hitCount} ä¸ªç‰©ä½“");
 
         System.Collections.Generic.HashSet<GameObject> processedObjects = new System.Collections.Generic.HashSet<GameObject>();
-        
-        //ÊµÊ©ÇĞ¸îËã·¨
-        for (int i=0;i<hitCount;i++)
+
+        //å®æ–½åˆ‡å‰²ç®—æ³•
+        for (int i = 0; i < hitCount; i++)
         {
             GameObject target = hitResults[i].collider.gameObject;
 
-            // Èç¹ûÕâ¸öÎïÌåÒÑ¾­±»´¦Àí¹ı£¨»òÕßÒÑ¾­±»Ïú»Ù£©£¬Ìø¹ı
+            // å¦‚æœè¿™ä¸ªç‰©ä½“å·²ç»è¢«å¤„ç†è¿‡ï¼ˆæˆ–è€…å·²ç»è¢«é”€æ¯ï¼‰ï¼Œè·³è¿‡
             if (target == null || processedObjects.Contains(target)) continue;
             processedObjects.Add(target);
 
-            Slicer.Slice(target,slicerStart, slicerEnd);
+            Slicer.Slice(target, slicerStart, slicerEnd);
         }
 
-        
+
 
     }
 }

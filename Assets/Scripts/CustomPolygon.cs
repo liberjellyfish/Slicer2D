@@ -5,7 +5,7 @@ using System.Collections.Generic;
 [RequireComponent(typeof(MeshFilter), typeof(MeshRenderer), typeof(PolygonCollider2D))]
 public class CustomPolygon : MonoBehaviour
 {
-    // ¶¨ÒåÍâÈ¦ (ÄæÊ±Õë) - ´óÕı·½ĞÎ
+    // å®šä¹‰å¤–åœˆ (é€†æ—¶é’ˆ) - å¤§æ­£æ–¹å½¢
     private List<Vector2> outerLoop = new List<Vector2>()
     {
         new Vector2(-3, -3),
@@ -14,8 +14,8 @@ public class CustomPolygon : MonoBehaviour
         new Vector2(-3, 3)
     };
 
-    // ¶¨ÒåËÄ¸öÄÚÈ¦ (Ë³Ê±Õë - ¶´)
-    // ×óÉÏ
+    // å®šä¹‰å››ä¸ªå†…åœˆ (é¡ºæ—¶é’ˆ - æ´)
+    // å·¦ä¸Š
     private List<Vector2> holeTL = new List<Vector2>()
     {
         new Vector2(-2, 2),
@@ -24,7 +24,7 @@ public class CustomPolygon : MonoBehaviour
         new Vector2(-2, 1)
     };
 
-    // ÓÒÉÏ
+    // å³ä¸Š
     private List<Vector2> holeTR = new List<Vector2>()
     {
         new Vector2(1, 2),
@@ -33,7 +33,7 @@ public class CustomPolygon : MonoBehaviour
         new Vector2(1, 1)
     };
 
-    // ×óÏÂ
+    // å·¦ä¸‹
     private List<Vector2> holeBL = new List<Vector2>()
     {
         new Vector2(-2, -1),
@@ -42,7 +42,7 @@ public class CustomPolygon : MonoBehaviour
         new Vector2(-2, -2)
     };
 
-    // ÓÒÏÂ
+    // å³ä¸‹
     private List<Vector2> holeBR = new List<Vector2>()
     {
         new Vector2(1, -1),
@@ -59,13 +59,13 @@ public class CustomPolygon : MonoBehaviour
     [ContextMenu("Refresh Grid")]
     void GenerateMesh()
     {
-        // 1. ×¼±¸Êı¾İ
+        // 1. å‡†å¤‡æ•°æ®
         List<List<Vector2>> holes = new List<List<Vector2>> { holeTL, holeTR, holeBL, holeBR };
 
-        // 2. µ÷ÓÃÔìÇÅËã·¨£¬½«ËùÓĞ¶´ÈÚºÏ½øÍâÈ¦
+        // 2. è°ƒç”¨é€ æ¡¥ç®—æ³•ï¼Œå°†æ‰€æœ‰æ´èåˆè¿›å¤–åœˆ
         List<Vector2> mergedPoints = PolygonHoleMerger.Merge(outerLoop, holes);
 
-        // 3. ×¼±¸Èı½ÇÆÊ·ÖÊı¾İ
+        // 3. å‡†å¤‡ä¸‰è§’å‰–åˆ†æ•°æ®
         Vector3[] vertices = new Vector3[mergedPoints.Count];
         Vector2[] uvs = new Vector2[mergedPoints.Count];
         Vector2[] points2D = new Vector2[mergedPoints.Count];
@@ -73,15 +73,15 @@ public class CustomPolygon : MonoBehaviour
         for (int i = 0; i < mergedPoints.Count; i++)
         {
             vertices[i] = new Vector3(mergedPoints[i].x, mergedPoints[i].y, 0);
-            // ¼òµ¥µÄ UV Ó³Éä£¬»ùÓÚ×ø±ê¹éÒ»»¯
+            // ç®€å•çš„ UV æ˜ å°„ï¼ŒåŸºäºåæ ‡å½’ä¸€åŒ–
             uvs[i] = new Vector2((mergedPoints[i].x + 3) / 6f, (mergedPoints[i].y + 3) / 6f);
             points2D[i] = mergedPoints[i];
         }
 
-        // 4. ¶úÇĞ·¨Éú³ÉÈı½ÇĞÎ
+        // 4. è€³åˆ‡æ³•ç”Ÿæˆä¸‰è§’å½¢
         int[] triangles = Triangulator.Triangulate(points2D);
 
-        // 5. ¹¹½¨ Mesh
+        // 5. æ„å»º Mesh
         Mesh mesh = new Mesh();
         mesh.name = "GridMesh";
         mesh.vertices = vertices;
@@ -91,9 +91,9 @@ public class CustomPolygon : MonoBehaviour
 
         GetComponent<MeshFilter>().mesh = mesh;
 
-        // 6. ÉèÖÃ Collider (¹Ø¼ü£º¶àÂ·¾¶)
+        // 6. è®¾ç½® Collider (å…³é”®ï¼šå¤šè·¯å¾„)
         PolygonCollider2D polyCol = GetComponent<PolygonCollider2D>();
-        polyCol.pathCount = 1 + holes.Count; // 1¸öÍâÈ¦ + 4¸ö¶´
+        polyCol.pathCount = 1 + holes.Count; // 1ä¸ªå¤–åœˆ + 4ä¸ªæ´
         polyCol.SetPath(0, outerLoop.ToArray());
 
         for (int i = 0; i < holes.Count; i++)

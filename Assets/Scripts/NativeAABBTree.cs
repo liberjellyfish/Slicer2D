@@ -3,45 +3,45 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
 /// <summary>
-/// ¸ßĞÔÄÜ¾²Ì¬ AABB Ê÷ (High-Performance Static AABB Tree)
+/// é«˜æ€§èƒ½é™æ€ AABB æ ‘ (High-Performance Static AABB Tree)
 /// <para>
-/// Éè¼ÆÄ¿±ê£º
-/// 1. Áã GC (Zero Garbage Collection)£ºÊ¹ÓÃ±âÆ½»¯Êı×éÌæ´ú¶ÔÏóÒıÓÃ£¬¹¹½¨¹ı³ÌÖĞ²»²úÉú¶ÑÄÚ´æ·ÖÅä¡£
-/// 2. »º´æÓÑºÃ (Cache Friendly)£º½ÚµãÔÚÄÚ´æÖĞÁ¬Ğø´æ·Å£¬Ìá¸ß CPU »º´æÃüÖĞÂÊ¡£
-/// 3. SIMD ÓÑºÃ£ºÒ¶×Ó½ÚµãÅúÁ¿´æ´¢ 4 Ìõ±ß£¬±ãÓÚºóĞøÀ©Õ¹ SIMD Ö¸Áî¼¯ÓÅ»¯¡£
+/// è®¾è®¡ç›®æ ‡ï¼š
+/// 1. é›¶ GC (Zero Garbage Collection)ï¼šä½¿ç”¨æ‰å¹³åŒ–æ•°ç»„æ›¿ä»£å¯¹è±¡å¼•ç”¨ï¼Œæ„å»ºè¿‡ç¨‹ä¸­ä¸äº§ç”Ÿå †å†…å­˜åˆ†é…ã€‚
+/// 2. ç¼“å­˜å‹å¥½ (Cache Friendly)ï¼šèŠ‚ç‚¹åœ¨å†…å­˜ä¸­è¿ç»­å­˜æ”¾ï¼Œæé«˜ CPU ç¼“å­˜å‘½ä¸­ç‡ã€‚
+/// 3. SIMD å‹å¥½ï¼šå¶å­èŠ‚ç‚¹æ‰¹é‡å­˜å‚¨ 4 æ¡è¾¹ï¼Œä¾¿äºåç»­æ‰©å±• SIMD æŒ‡ä»¤é›†ä¼˜åŒ–ã€‚
 /// </para>
 /// </summary>
 public class NativeAABBTree
 {
     /// <summary>
-    /// ±âÆ½»¯Ê÷½Úµã (32 bytes)
-    /// ²»Ê¹ÓÃ Class£¬¶øÊÇ Struct£¬Ö±½Ó´æ·ÅÔÚ´óÊı×éÖĞ¡£
+    /// æ‰å¹³åŒ–æ ‘èŠ‚ç‚¹ (32 bytes)
+    /// ä¸ä½¿ç”¨ Classï¼Œè€Œæ˜¯ Structï¼Œç›´æ¥å­˜æ”¾åœ¨å¤§æ•°ç»„ä¸­ã€‚
     /// </summary>
     public struct FlatNode
     {
-        // AABB °üÎ§ºĞÊı¾İ
+        // AABB åŒ…å›´ç›’æ•°æ®
         public float minX, minY, maxX, maxY;
 
-        // ×Ó½ÚµãË÷Òı (Ìæ´ú´«Í³Ê÷µÄ Left/Right Ö¸Õë)
+        // å­èŠ‚ç‚¹ç´¢å¼• (æ›¿ä»£ä¼ ç»Ÿæ ‘çš„ Left/Right æŒ‡é’ˆ)
         public int leftChildIndex;
         public int rightChildIndex;
 
-        // Ò¶×Ó½ÚµãÊı¾İ (½öÒ¶×Ó½ÚµãÓĞĞ§)
-        // Ö¸Ïò segments Êı×éÖĞµÄÆğÊ¼Î»ÖÃºÍ³¤¶È
+        // å¶å­èŠ‚ç‚¹æ•°æ® (ä»…å¶å­èŠ‚ç‚¹æœ‰æ•ˆ)
+        // æŒ‡å‘ segments æ•°ç»„ä¸­çš„èµ·å§‹ä½ç½®å’Œé•¿åº¦
         public int segmentStartIndex;
         public int segmentCount;
 
         /// <summary>
-        /// ¿ìËÙ¼ì²â AABB ÖØµş (ÄÚÁªÓÅ»¯)
+        /// å¿«é€Ÿæ£€æµ‹ AABB é‡å  (å†…è”ä¼˜åŒ–)
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool IntersectsBox(Vector2 p1, Vector2 p2)
         {
-            // ¼ÆËãÏß¶ÎµÄ AABB
+            // è®¡ç®—çº¿æ®µçš„ AABB
             float sMinX = p1.x < p2.x ? p1.x : p2.x;
             float sMaxX = p1.x > p2.x ? p1.x : p2.x;
 
-            // ·ÖÀëÖá¶¨Àí (SAT) µÄ¼ò»¯°æ£ºAABB ²»ÖØµş
+            // åˆ†ç¦»è½´å®šç† (SAT) çš„ç®€åŒ–ç‰ˆï¼šAABB ä¸é‡å 
             if (sMinX > maxX || sMaxX < minX) return false;
 
             float sMinY = p1.y < p2.y ? p1.y : p2.y;
@@ -53,8 +53,8 @@ public class NativeAABBTree
     }
 
     /// <summary>
-    /// Ô­Ê¼Ïß¶ÎÊı¾İ
-    /// °üº¬Ô¤¼ÆËãµÄ°üÎ§ºĞ£¬±ÜÃâÔËĞĞÊ±ÖØ¸´¼ÆËã
+    /// åŸå§‹çº¿æ®µæ•°æ®
+    /// åŒ…å«é¢„è®¡ç®—çš„åŒ…å›´ç›’ï¼Œé¿å…è¿è¡Œæ—¶é‡å¤è®¡ç®—
     /// </summary>
     public struct Segment
     {
@@ -62,39 +62,39 @@ public class NativeAABBTree
         public float minX, minY, maxX, maxY;
     }
 
-    // === ºËĞÄÊı¾İ´æ´¢ ===
-    // Ô¤·ÖÅäµÄ´óÊı×é£¬¶ÔÏó³Ø¸´ÓÃ
+    // === æ ¸å¿ƒæ•°æ®å­˜å‚¨ ===
+    // é¢„åˆ†é…çš„å¤§æ•°ç»„ï¼Œå¯¹è±¡æ± å¤ç”¨
     private FlatNode[] nodes;
-    private Segment[] segments; // ÕâÀïµÄÏß¶Î»á±» QuickSort ·ç¸ñÖØÅÅ
+    private Segment[] segments; // è¿™é‡Œçš„çº¿æ®µä¼šè¢« QuickSort é£æ ¼é‡æ’
     private int nodesUsed;
 
-    // Ò¶×ÓÈİÁ¿ãĞÖµ£ºĞ¡ÓÚ´ËÊıÁ¿²»ÔÙ·ÖÁÑ
-    // 4 ÊÇ¾­ÑéÖµ£¬Æ½ºâÊ÷Éî¶ÈÓëÏßĞÔ±éÀú¿ªÏú
+    // å¶å­å®¹é‡é˜ˆå€¼ï¼šå°äºæ­¤æ•°é‡ä¸å†åˆ†è£‚
+    // 4 æ˜¯ç»éªŒå€¼ï¼Œå¹³è¡¡æ ‘æ·±åº¦ä¸çº¿æ€§éå†å¼€é”€
     private const int MAX_LEAF_SIZE = 4;
 
     /// <summary>
-    /// ¹¹½¨ AABB Ê÷ (O(N log N))
+    /// æ„å»º AABB æ ‘ (O(N log N))
     /// </summary>
-    /// <param name="outerLoop">ÍâÈ¦¶¥µã</param>
-    /// <param name="holes">¿×¶´ÁĞ±í</param>
+    /// <param name="outerLoop">å¤–åœˆé¡¶ç‚¹</param>
+    /// <param name="holes">å­”æ´åˆ—è¡¨</param>
     public void Build(List<Vector2> outerLoop, List<List<Vector2>> holes)
     {
-        // 1. Í³¼Æ×Ü±ßÊı£¬Ò»´ÎĞÔ·ÖÅäÄÚ´æ£¬±ÜÃâ Resize
+        // 1. ç»Ÿè®¡æ€»è¾¹æ•°ï¼Œä¸€æ¬¡æ€§åˆ†é…å†…å­˜ï¼Œé¿å… Resize
         int totalEdges = outerLoop.Count;
         if (holes != null)
         {
             for (int i = 0; i < holes.Count; i++) totalEdges += holes[i].Count;
         }
 
-        // ÀÁ¼ÓÔØ³õÊ¼»¯»òÀ©Èİ
+        // æ‡’åŠ è½½åˆå§‹åŒ–æˆ–æ‰©å®¹
         if (segments == null || segments.Length < totalEdges)
             segments = new Segment[totalEdges];
 
-        // ¶ş²æÊ÷½ÚµãÊıÉÏÏŞÔ¼Îª 2*N
+        // äºŒå‰æ ‘èŠ‚ç‚¹æ•°ä¸Šé™çº¦ä¸º 2*N
         if (nodes == null || nodes.Length < totalEdges * 2)
             nodes = new FlatNode[totalEdges * 2];
 
-        // 2. Ìî³äÏß¶ÎÊı×é (´ËÊ±ÊÇÂÒĞòµÄ)
+        // 2. å¡«å……çº¿æ®µæ•°ç»„ (æ­¤æ—¶æ˜¯ä¹±åºçš„)
         int ptr = 0;
         AddSegmentsFromLoop(outerLoop, ref ptr);
         if (holes != null)
@@ -102,7 +102,7 @@ public class NativeAABBTree
             for (int i = 0; i < holes.Count; i++) AddSegmentsFromLoop(holes[i], ref ptr);
         }
 
-        // 3. µİ¹é½¨Ê÷
+        // 3. é€’å½’å»ºæ ‘
         nodesUsed = 0;
         if (totalEdges > 0)
         {
@@ -110,7 +110,7 @@ public class NativeAABBTree
         }
     }
 
-    // ½«»·Â·¶¥µã×ª»»ÎªÏß¶Î´æÈëÊı×é
+    // å°†ç¯è·¯é¡¶ç‚¹è½¬æ¢ä¸ºçº¿æ®µå­˜å…¥æ•°ç»„
     private void AddSegmentsFromLoop(List<Vector2> loop, ref int ptr)
     {
         int count = loop.Count;
@@ -123,11 +123,11 @@ public class NativeAABBTree
             Vector2 p1 = loop[i];
             Vector2 p2 = loop[(i + 1) % count];
 
-            // ´æÈëÊı¾İ
+            // å­˜å…¥æ•°æ®
             segments[ptr].P1 = p1;
             segments[ptr].P2 = p2;
 
-            // Ô¤¼ÆËã Min/Max£¬¼ÓËÙºóĞøµÄ Partition ¹ı³Ì
+            // é¢„è®¡ç®— Min/Maxï¼ŒåŠ é€Ÿåç»­çš„ Partition è¿‡ç¨‹
             segments[ptr].minX = p1.x < p2.x ? p1.x : p2.x;
             segments[ptr].minY = p1.y < p2.y ? p1.y : p2.y;
             segments[ptr].maxX = p1.x > p2.x ? p1.x : p2.x;
@@ -137,21 +137,21 @@ public class NativeAABBTree
     }
 
     /// <summary>
-    /// µİ¹é¹¹½¨º¯Êı (In-Place Partitioning)
-    /// ºËĞÄÓÅ»¯£ºÖ±½ÓÔÚ segments Êı×éÉÏ½øĞĞ½»»»ÅÅĞò£¬²»Ê¹ÓÃÈÎºÎÁÙÊ± List
+    /// é€’å½’æ„å»ºå‡½æ•° (In-Place Partitioning)
+    /// æ ¸å¿ƒä¼˜åŒ–ï¼šç›´æ¥åœ¨ segments æ•°ç»„ä¸Šè¿›è¡Œäº¤æ¢æ’åºï¼Œä¸ä½¿ç”¨ä»»ä½•ä¸´æ—¶ List
     /// </summary>
     private int BuildRecursive(int start, int count)
     {
-        // ·ÖÅä½Úµã ID
+        // åˆ†é…èŠ‚ç‚¹ ID
         int nodeIndex = nodesUsed++;
 
-        // 1. ¼ÆËãµ±Ç°¼¯ºÏµÄ×Ü°üÎ§ºĞ
+        // 1. è®¡ç®—å½“å‰é›†åˆçš„æ€»åŒ…å›´ç›’
         float minX = float.MaxValue, minY = float.MaxValue;
         float maxX = float.MinValue, maxY = float.MinValue;
 
         for (int i = 0; i < count; i++)
         {
-            ref Segment s = ref segments[start + i]; // Ê¹ÓÃ ref ±ÜÃâ½á¹¹Ìå¿½±´
+            ref Segment s = ref segments[start + i]; // ä½¿ç”¨ ref é¿å…ç»“æ„ä½“æ‹·è´
             if (s.minX < minX) minX = s.minX;
             if (s.minY < minY) minY = s.minY;
             if (s.maxX > maxX) maxX = s.maxX;
@@ -163,7 +163,7 @@ public class NativeAABBTree
         nodes[nodeIndex].maxX = maxX;
         nodes[nodeIndex].maxY = maxY;
 
-        // 2. Ò¶×Ó½ÚµãÅĞ¶¨ (Base Case)
+        // 2. å¶å­èŠ‚ç‚¹åˆ¤å®š (Base Case)
         if (count <= MAX_LEAF_SIZE)
         {
             nodes[nodeIndex].segmentStartIndex = start;
@@ -173,15 +173,15 @@ public class NativeAABBTree
             return nodeIndex;
         }
 
-        nodes[nodeIndex].segmentCount = 0; // ±ê¼ÇÎª·ÇÒ¶×Ó
+        nodes[nodeIndex].segmentCount = 0; // æ ‡è®°ä¸ºéå¶å­
 
-        // 3. ¿Õ¼ä»®·Ö (Spatial Partitioning)
-        // Ñ¡Ôñ×î³¤Öá½øĞĞ·Ö¸î£¬Ê¹Ê÷¸üÆ½ºâ
+        // 3. ç©ºé—´åˆ’åˆ† (Spatial Partitioning)
+        // é€‰æ‹©æœ€é•¿è½´è¿›è¡Œåˆ†å‰²ï¼Œä½¿æ ‘æ›´å¹³è¡¡
         bool splitX = (maxX - minX) > (maxY - minY);
         float mid = splitX ? (minX + maxX) * 0.5f : (minY + maxY) * 0.5f;
 
-        // 4. Ô­µØ»®·ÖËã·¨ (ÀàËÆ QuickSort µÄ Partition)
-        // ½«Ğ¡ÓÚÖĞµãµÄÏß¶Î»»µ½×ó±ß£¬´óÓÚµÄ»»µ½ÓÒ±ß
+        // 4. åŸåœ°åˆ’åˆ†ç®—æ³• (ç±»ä¼¼ QuickSort çš„ Partition)
+        // å°†å°äºä¸­ç‚¹çš„çº¿æ®µæ¢åˆ°å·¦è¾¹ï¼Œå¤§äºçš„æ¢åˆ°å³è¾¹
         int left = start;
         int right = start + count - 1;
         while (left <= right)
@@ -205,10 +205,10 @@ public class NativeAABBTree
         }
 
         int leftCount = left - start;
-        // ±ß½ç±£»¤£ºÈç¹ûËùÓĞÏß¶ÎÖĞĞÄµãÖØºÏ£¬Ç¿ÖÆ¶Ô°ë·Ö£¬·ÀÖ¹ËÀÑ­»·
+        // è¾¹ç•Œä¿æŠ¤ï¼šå¦‚æœæ‰€æœ‰çº¿æ®µä¸­å¿ƒç‚¹é‡åˆï¼Œå¼ºåˆ¶å¯¹åŠåˆ†ï¼Œé˜²æ­¢æ­»å¾ªç¯
         if (leftCount == 0 || leftCount == count) leftCount = count / 2;
 
-        // 5. µİ¹é
+        // 5. é€’å½’
         nodes[nodeIndex].leftChildIndex = BuildRecursive(start, leftCount);
         nodes[nodeIndex].rightChildIndex = BuildRecursive(start + leftCount, count - leftCount);
 
@@ -216,7 +216,7 @@ public class NativeAABBTree
     }
 
     /// <summary>
-    /// ²éÑ¯Ïß¶ÎÊÇ·ñÓëÊ÷ÖĞÈÎÒâÏß¶ÎÏà½» (O(log N))
+    /// æŸ¥è¯¢çº¿æ®µæ˜¯å¦ä¸æ ‘ä¸­ä»»æ„çº¿æ®µç›¸äº¤ (O(log N))
     /// </summary>
     public bool Intersects(Vector2 p1, Vector2 p2)
     {
@@ -226,20 +226,20 @@ public class NativeAABBTree
 
     private bool IntersectsRecursive(int nodeIdx, Vector2 p1, Vector2 p2)
     {
-        // 1. AABB ÌŞ³ı (Pruning)
+        // 1. AABB å‰”é™¤ (Pruning)
         if (!nodes[nodeIdx].IntersectsBox(p1, p2)) return false;
 
-        // 2. Ò¶×Ó½Úµã´¦Àí
+        // 2. å¶å­èŠ‚ç‚¹å¤„ç†
         if (nodes[nodeIdx].segmentCount > 0)
         {
             int start = nodes[nodeIdx].segmentStartIndex;
             int end = start + nodes[nodeIdx].segmentCount;
-            // ±©Á¦±éÀúÒ¶×ÓÄÚµÄ¼¸Ìõ±ß
+            // æš´åŠ›éå†å¶å­å†…çš„å‡ æ¡è¾¹
             for (int i = start; i < end; i++)
             {
                 ref Segment s = ref segments[i];
 
-                // ÅÅ³ı¹²Ïí¶¥µã (Èç¹ûÁ¬½Óµã±¾Éí¾ÍÔÚÇ½ÉÏ£¬²»Ëã×²Ç½)
+                // æ’é™¤å…±äº«é¡¶ç‚¹ (å¦‚æœè¿æ¥ç‚¹æœ¬èº«å°±åœ¨å¢™ä¸Šï¼Œä¸ç®—æ’å¢™)
                 if (IsSamePoint(s.P1, p1) || IsSamePoint(s.P1, p2) ||
                     IsSamePoint(s.P2, p1) || IsSamePoint(s.P2, p2)) continue;
 
@@ -248,14 +248,14 @@ public class NativeAABBTree
             return false;
         }
 
-        // 3. µİ¹é²éÑ¯
+        // 3. é€’å½’æŸ¥è¯¢
         if (IntersectsRecursive(nodes[nodeIdx].leftChildIndex, p1, p2)) return true;
         if (IntersectsRecursive(nodes[nodeIdx].rightChildIndex, p1, p2)) return true;
 
         return false;
     }
 
-    // Ôö¼ÓÈİ²îµ½ 1e-7f£¬´¦Àí float ¾«¶ÈÎÊÌâ
+    // å¢åŠ å®¹å·®åˆ° 1e-7fï¼Œå¤„ç† float ç²¾åº¦é—®é¢˜
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool IsSamePoint(Vector2 a, Vector2 b)
     {
@@ -273,7 +273,7 @@ public class NativeAABBTree
         float u = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / den;
         float v = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / den;
 
-        // ÑÏ¸ñÄÚ²¿Ïà½» (²»°üº¬¶Ëµã)£¬·ÀÖ¹ÎóÅĞÁÚ±ß
+        // ä¸¥æ ¼å†…éƒ¨ç›¸äº¤ (ä¸åŒ…å«ç«¯ç‚¹)ï¼Œé˜²æ­¢è¯¯åˆ¤é‚»è¾¹
         return (u > 1e-5f && u < 1f - 1e-5f && v > 1e-5f && v < 1f - 1e-5f);
     }
 }

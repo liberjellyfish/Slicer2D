@@ -1,7 +1,7 @@
 using UnityEngine;
 
 [ExecuteAlways]
-[RequireComponent(typeof(MeshFilter),typeof(MeshRenderer))]
+[RequireComponent(typeof(MeshFilter), typeof(MeshRenderer))]
 public class SimpleQuadGen : MonoBehaviour
 {
     void OnEnable()
@@ -10,7 +10,7 @@ public class SimpleQuadGen : MonoBehaviour
     }
     void GenerateMesh()
     {
-        //¶¨Òå¶¥µã£¬Ë³Ê±Õë
+        //å®šä¹‰é¡¶ç‚¹ï¼Œé¡ºæ—¶é’ˆ
         Vector3[] vertices = new Vector3[]
         {
             new Vector3(-1,-1, 0),
@@ -19,7 +19,7 @@ public class SimpleQuadGen : MonoBehaviour
             new Vector3( 1,-1, 0)
         };
 
-        //¶¨Òåuv£¨¶ÔÓ¦¶¥µãµÄÎÆÀí×ø±ê£¬·¶Î§0-1£¬¹éÒ»»¯£©
+        //å®šä¹‰uvï¼ˆå¯¹åº”é¡¶ç‚¹çš„çº¹ç†åæ ‡ï¼ŒèŒƒå›´0-1ï¼Œå½’ä¸€åŒ–ï¼‰
         Vector2[] uv = new Vector2[]
         {
             new Vector2(0,0),
@@ -28,13 +28,13 @@ public class SimpleQuadGen : MonoBehaviour
             new Vector2(1,0)
         };
 
-        //¶¨ÒåÈı½ÇĞÎË÷Òı
-        int[]triangles = new int[]
+        //å®šä¹‰ä¸‰è§’å½¢ç´¢å¼•
+        int[] triangles = new int[]
         {
-            0,1,2,//µÚÒ»¸öÈı½ÇĞÎ
-            0,2,3//µÚ¶ş¸öÈı½ÇĞÎ
+            0,1,2,//ç¬¬ä¸€ä¸ªä¸‰è§’å½¢
+            0,2,3//ç¬¬äºŒä¸ªä¸‰è§’å½¢
         };
-        
+
         Mesh mesh = new Mesh();
         mesh.name = "ProceduralQuad";
         mesh.vertices = vertices;
@@ -42,22 +42,22 @@ public class SimpleQuadGen : MonoBehaviour
         mesh.triangles = triangles;
 
         mesh.RecalculateNormals();
-        //¸³Öµ¸ø×é¼ş
+        //èµ‹å€¼ç»™ç»„ä»¶
         GetComponent<MeshFilter>().mesh = mesh;
 
-        //Ê¹µÃÆäÌùºÏÕı·½ĞÎ
+        //ä½¿å¾—å…¶è´´åˆæ­£æ–¹å½¢
         PolygonCollider2D polyCol = GetComponent<PolygonCollider2D>();
-        if(polyCol != null)
+        if (polyCol != null)
         {
             Vector2[] path = new Vector2[vertices.Length];
-            for(int i=0;i<vertices.Length; i++)
+            for (int i = 0; i < vertices.Length; i++)
             {
-                path[i] =new Vector2(vertices[i].x, vertices[i].y);
+                path[i] = new Vector2(vertices[i].x, vertices[i].y);
             }
 
-            polyCol.SetPath(0,path);
+            polyCol.SetPath(0, path);
         }
     }
 
-    
+
 }

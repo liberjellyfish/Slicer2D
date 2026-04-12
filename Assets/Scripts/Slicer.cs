@@ -32,7 +32,7 @@ public static class Slicer
         for (int i = 0; i < polyCollider.pathCount; i++)
         {
             Vector2[] pathArr = polyCollider.GetPath(i);
-            var list = new List<Vector2>(pathArr); 
+            var list = new List<Vector2>(pathArr);
             originalPaths.Add(list);
         }
 
@@ -45,7 +45,7 @@ public static class Slicer
         catch (System.Exception e)
         {
             Debug.LogError($"[Slicer] Error: {e.Message}");
-            return; 
+            return;
         }
 
         if (slicedPolygons == null || slicedPolygons.Count == 0) return;

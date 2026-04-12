@@ -2,14 +2,14 @@ using UnityEngine;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 
-// ÕâÊÇÒ»¸ö´¿¾²Ì¬µÄ¼ÆËãºËĞÄ£¬²»ÒÀÀµ GameObject ÊµÀı»¯
+// è¿™æ˜¯ä¸€ä¸ªçº¯é™æ€çš„è®¡ç®—æ ¸å¿ƒï¼Œä¸ä¾èµ– GameObject å®ä¾‹åŒ–
 public static class SlicerCore
 {
     // =================================================================================
-    //                                  ÄÚ´æ³ØÓëÉÏÏÂÎÄ
+    //                                  å†…å­˜æ± ä¸ä¸Šä¸‹æ–‡
     // =================================================================================
 
-    // ÓÃÓÚ±ÜÃâ Vector2 ÔÚ Dictionary ÖĞ×°ÏäºÍ¹şÏ£³åÍ»
+    // ç”¨äºé¿å… Vector2 åœ¨ Dictionary ä¸­è£…ç®±å’Œå“ˆå¸Œå†²çª
     public struct Vector2Comparer : IEqualityComparer<Vector2>
     {
         public bool Equals(Vector2 x, Vector2 y)
@@ -19,26 +19,26 @@ public static class SlicerCore
 
         public int GetHashCode(Vector2 obj)
         {
-            // ¼òµ¥µÄ¿Õ¼ä¹şÏ££¬³Ë´óÖÊÊı
+            // ç®€å•çš„ç©ºé—´å“ˆå¸Œï¼Œä¹˜å¤§è´¨æ•°
             return ((int)(obj.x * 1000) * 397) ^ (int)(obj.y * 1000);
         }
     }
 
-    // ±ÜÃâ Lambda ÅÅĞò²úÉúµÄ GC
+    // é¿å… Lambda æ’åºäº§ç”Ÿçš„ GC
     private struct IntersectionComparer : IComparer<IntersectionInfo>
     {
         public List<Vector2> Path;
         public int Compare(IntersectionInfo a, IntersectionInfo b)
         {
             if (a.SegmentIndex != b.SegmentIndex) return a.SegmentIndex.CompareTo(b.SegmentIndex);
-            // »º´æµÄ Path ·ÃÎÊ
+            // ç¼“å­˜çš„ Path è®¿é—®
             float distA = (a.Point.x - Path[a.SegmentIndex].x) * (a.Point.x - Path[a.SegmentIndex].x) + (a.Point.y - Path[a.SegmentIndex].y) * (a.Point.y - Path[a.SegmentIndex].y);
             float distB = (b.Point.x - Path[b.SegmentIndex].x) * (b.Point.x - Path[b.SegmentIndex].x) + (b.Point.y - Path[b.SegmentIndex].y) * (b.Point.y - Path[b.SegmentIndex].y);
             return distA.CompareTo(distB);
         }
     }
 
-    // ÇĞ¸îµãÅÅĞò
+    // åˆ‡å‰²ç‚¹æ’åº
     private struct CutIntersectionComparer : IComparer<Vector2>
     {
         public Vector2 Start, End;
@@ -50,7 +50,7 @@ public static class SlicerCore
         }
     }
 
-    // ºËĞÄÊı¾İ½á¹¹£ºPolygonData (¸ÄÎª¿É»ØÊÕµÄÀà)
+    // æ ¸å¿ƒæ•°æ®ç»“æ„ï¼šPolygonData (æ”¹ä¸ºå¯å›æ”¶çš„ç±»)
     public class PolygonData
     {
         public List<Vector2> OuterLoop;
@@ -58,31 +58,31 @@ public static class SlicerCore
         public float Area;
         public Bounds Bounds;
 
-        public PolygonData() { } // ÓÉ³Ø¹ÜÀí³õÊ¼»¯
+        public PolygonData() { } // ç”±æ± ç®¡ç†åˆå§‹åŒ–
 
         public void Init()
         {
             if (Holes == null) Holes = new List<List<Vector2>>();
             else Holes.Clear();
-            OuterLoop = null; // ÓÉÍâ²¿¸³Öµ
+            OuterLoop = null; // ç”±å¤–éƒ¨èµ‹å€¼
             Area = 0;
             Bounds = default;
         }
     }
 
-    // ÉÏÏÂÎÄ£ºÒ»´ÎÇĞ¸î²Ù×÷ÖĞ¸´ÓÃµÄËùÓĞÄÚ´æ
+    // ä¸Šä¸‹æ–‡ï¼šä¸€æ¬¡åˆ‡å‰²æ“ä½œä¸­å¤ç”¨çš„æ‰€æœ‰å†…å­˜
     private class SliceContext
     {
         public Dictionary<Vector2, List<Vector2>> Graph;
         public List<Vector2> CutIntersections;
         public HashSet<EdgeKey> VisitedEdges;
 
-        // ¸÷ÖÖÁÙÊ±ÁĞ±í£¬±ÜÃâ·´¸´ new
+        // å„ç§ä¸´æ—¶åˆ—è¡¨ï¼Œé¿å…åå¤ new
         public List<IntersectionInfo> TempHits;
         public List<Vector2> TempNewPath;
         public List<List<Vector2>> TempRawLoops;
 
-        // ¶ÔÏó³Ø
+        // å¯¹è±¡æ± 
         public Stack<List<Vector2>> ListPool;
         public Stack<PolygonData> PolyPool;
 
@@ -120,7 +120,7 @@ public static class SlicerCore
         public void ReturnPoly(PolygonData p)
         {
             if (p == null) return;
-            // ¹é»¹Ëü³ÖÓĞµÄ Lists
+            // å½’è¿˜å®ƒæŒæœ‰çš„ Lists
             if (p.OuterLoop != null) ReturnList(p.OuterLoop);
             if (p.Holes != null)
             {
@@ -138,29 +138,29 @@ public static class SlicerCore
             VisitedEdges.Clear();
             TempHits.Clear();
             TempNewPath.Clear();
-            // TempRawLoops µÄÔªËØÒ²ÊÇ List£¬ĞèÒªµ¥¶À´¦Àí¹é»¹Âß¼­£¬ÔÚ ExtractLoops ÄÚ²¿´¦Àí
+            // TempRawLoops çš„å…ƒç´ ä¹Ÿæ˜¯ Listï¼Œéœ€è¦å•ç‹¬å¤„ç†å½’è¿˜é€»è¾‘ï¼Œåœ¨ ExtractLoops å†…éƒ¨å¤„ç†
         }
     }
 
-    // ¾²Ì¬µ¥ÀıÉÏÏÂÎÄ£¬µ¥Ïß³ÌÏÂ°²È« (Unity Ğ­³ÌĞèÒªÔÚÖ÷Ïß³ÌÅÜ£¬ËùÒÔÍ¨³£ÊÇ°²È«µÄ)
-    // Èç¹ûÓĞ¶àÏß³ÌĞèÇó£¬Ğè¸ÄÎª [ThreadStatic]
+    // é™æ€å•ä¾‹ä¸Šä¸‹æ–‡ï¼Œå•çº¿ç¨‹ä¸‹å®‰å…¨ (Unity åç¨‹éœ€è¦åœ¨ä¸»çº¿ç¨‹è·‘ï¼Œæ‰€ä»¥é€šå¸¸æ˜¯å®‰å…¨çš„)
+    // å¦‚æœæœ‰å¤šçº¿ç¨‹éœ€æ±‚ï¼Œéœ€æ”¹ä¸º [ThreadStatic]
     private static SliceContext context = new SliceContext();
 
     // =================================================================================
-    //                                  ÅäÖÃ³£Á¿ & ½á¹¹
+    //                                  é…ç½®å¸¸é‡ & ç»“æ„
     // =================================================================================
     private const float MIN_VERT_DIST_SQ = 0.0001f; // 0.01 * 0.01
     private const float AREA_THRESHOLD = 0.01f;
 
     private readonly struct EdgeKey : System.IEquatable<EdgeKey>
     {
-        private readonly long id; // ½«×ø±êÑ¹Ëõ³ÉÒ»¸ö long
+        private readonly long id; // å°†åæ ‡å‹ç¼©æˆä¸€ä¸ª long
         public EdgeKey(Vector2 u, Vector2 v)
         {
-            // ¼òµ¥Á¿»¯´¦Àí
+            // ç®€å•é‡åŒ–å¤„ç†
             int x1 = (int)(u.x * 1000); int y1 = (int)(u.y * 1000);
             int x2 = (int)(v.x * 1000); int y2 = (int)(v.y * 1000);
-            // »ìºÏ hash
+            // æ··åˆ hash
             id = ((long)x1 << 48) ^ ((long)y1 << 32) ^ ((long)x2 << 16) ^ (long)y2;
         }
         public bool Equals(EdgeKey other) => id == other.id;
@@ -175,28 +175,28 @@ public static class SlicerCore
     }
 
     // =================================================================================
-    //                                  ¶ÔÍâ¼ÆËã½Ó¿Ú
+    //                                  å¯¹å¤–è®¡ç®—æ¥å£
     // =================================================================================
 
     /// <summary>
-    /// Ö´ĞĞºËĞÄÇĞ¸î¼ÆËã¡£
-    /// µ÷ÓÃ·½ÔÚÊ¹ÓÃÍêÊı¾İÉú³É Mesh ºó£¬µ÷ÓÃ FreeResult() À´¹é»¹ÄÚ´æ¡£
+    /// æ‰§è¡Œæ ¸å¿ƒåˆ‡å‰²è®¡ç®—ã€‚
+    /// è°ƒç”¨æ–¹åœ¨ä½¿ç”¨å®Œæ•°æ®ç”Ÿæˆ Mesh åï¼Œè°ƒç”¨ FreeResult() æ¥å½’è¿˜å†…å­˜ã€‚
     /// </summary>
     public static List<PolygonData> Calculate(List<List<Vector2>> originalPaths, Vector2 start, Vector2 end)
     {
-        // 1. ÇåÀí²¢×¼±¸ÉÏÏÂÎÄ
+        // 1. æ¸…ç†å¹¶å‡†å¤‡ä¸Šä¸‹æ–‡
         context.ClearAll();
 
         var graph = context.Graph;
         var cutIntersections = context.CutIntersections;
 
-        // --- Phase 1: ¹¹½¨ÍØÆËÍ¼ ---
+        // --- Phase 1: æ„å»ºæ‹“æ‰‘å›¾ ---
         IntersectionComparer hitComparer = new IntersectionComparer();
 
         foreach (var path in originalPaths)
         {
             context.TempHits.Clear();
-            hitComparer.Path = path; // ÉèÖÃ Comparer ÉÏÏÂÎÄ
+            hitComparer.Path = path; // è®¾ç½® Comparer ä¸Šä¸‹æ–‡
 
             for (int i = 0; i < path.Count; i++)
             {
@@ -209,10 +209,10 @@ public static class SlicerCore
                 }
             }
 
-            // ÎŞ GC ÅÅĞò
+            // æ—  GC æ’åº
             context.TempHits.Sort(hitComparer);
 
-            // ÖØ½¨Â·¾¶
+            // é‡å»ºè·¯å¾„
             context.TempNewPath.Clear();
             var newPathVertices = context.TempNewPath;
 
@@ -236,7 +236,7 @@ public static class SlicerCore
                     hitIndex++;
                 }
             }
-            // ±ÕºÏ¼ì²é
+            // é—­åˆæ£€æŸ¥
             if (newPathVertices.Count > 1 && SqrDist(newPathVertices[0], newPathVertices[newPathVertices.Count - 1]) < MIN_VERT_DIST_SQ)
                 newPathVertices.RemoveAt(newPathVertices.Count - 1);
 
@@ -246,8 +246,8 @@ public static class SlicerCore
             }
         }
 
-        // --- Phase 2: ´¦ÀíÇĞ¸î·ì ---
-        // È¥ÖØ
+        // --- Phase 2: å¤„ç†åˆ‡å‰²ç¼ ---
+        // å»é‡
         for (int i = cutIntersections.Count - 1; i >= 0; i--)
         {
             for (int j = 0; j < i; j++)
@@ -262,7 +262,7 @@ public static class SlicerCore
 
         if (cutIntersections.Count < 2) return null;
 
-        // ÅÅĞò
+        // æ’åº
         cutIntersections.Sort(new CutIntersectionComparer { Start = start, End = end });
 
         int validCount = (cutIntersections.Count % 2 == 0) ? cutIntersections.Count : cutIntersections.Count - 1;
@@ -277,31 +277,31 @@ public static class SlicerCore
             }
         }
 
-        // --- Phase 3: ÌáÈ¡»ØÂ· ---
-        ExtractLoops(graph); // ½á¹û´æÈë context.TempRawLoops
+        // --- Phase 3: æå–å›è·¯ ---
+        ExtractLoops(graph); // ç»“æœå­˜å…¥ context.TempRawLoops
 
-        List<PolygonData> solids = new List<PolygonData>(); // Õâ¸ö List ĞèÒª·µ»Ø¸øÍâ²¿£¬ËùÒÔ new ËüÊÇºÏÀíµÄ£¬»òÕßÒ²¿ÉÒÔ³Ø»¯
+        List<PolygonData> solids = new List<PolygonData>(); // è¿™ä¸ª List éœ€è¦è¿”å›ç»™å¤–éƒ¨ï¼Œæ‰€ä»¥ new å®ƒæ˜¯åˆç†çš„ï¼Œæˆ–è€…ä¹Ÿå¯ä»¥æ± åŒ–
         List<List<Vector2>> holes = new List<List<Vector2>>();
 
         foreach (var rawLoop in context.TempRawLoops)
         {
             List<Vector2> loop = SimplifyPath(rawLoop);
-            // rawLoop ¹é»¹³Ø
+            // rawLoop å½’è¿˜æ± 
             context.ReturnList(rawLoop);
 
             float area = SignedArea(loop);
             if (Mathf.Abs(area) < AREA_THRESHOLD)
             {
-                context.ReturnList(loop); // ÎŞĞ§ loop£¬¹é»¹
+                context.ReturnList(loop); // æ— æ•ˆ loopï¼Œå½’è¿˜
                 continue;
             }
 
             if (area > 0)
             {
-                PolygonData poly = context.GetPoly(); // ´Ó³ØÖĞÈ¡
+                PolygonData poly = context.GetPoly(); // ä»æ± ä¸­å–
                 poly.OuterLoop = loop;
                 poly.Area = area;
-                poly.Bounds = CalculateBounds(loop); // ÄÚÁªÓÅ»¯
+                poly.Bounds = CalculateBounds(loop); // å†…è”ä¼˜åŒ–
                 solids.Add(poly);
             }
             else
@@ -309,11 +309,11 @@ public static class SlicerCore
                 holes.Add(loop);
             }
         }
-        context.TempRawLoops.Clear(); // ÁĞ±í±¾ÉíÇå¿Õ£¬ÄÚÈİÒÑ×ªÒÆ»ò¹é»¹
+        context.TempRawLoops.Clear(); // åˆ—è¡¨æœ¬èº«æ¸…ç©ºï¼Œå†…å®¹å·²è½¬ç§»æˆ–å½’è¿˜
 
-        // --- Phase 4: AABB Ê÷¹éÊôÈ¨·ÖÅä ---
+        // --- Phase 4: AABB æ ‘å½’å±æƒåˆ†é… ---
         NativePolyTree tree = new NativePolyTree();
-        tree.Build(solids); // ×¢Òâ£ºtree ÄÚ²¿ÒıÓÃÁË solids ÁĞ±í
+        tree.Build(solids); // æ³¨æ„ï¼štree å†…éƒ¨å¼•ç”¨äº† solids åˆ—è¡¨
 
         for (int i = 0; i < holes.Count; i++)
         {
@@ -334,12 +334,12 @@ public static class SlicerCore
             }
             else
             {
-                // ¹Â¶ù¿×¶´£¬ÎªÁËÄÚ´æ°²È«ĞèÒª¹é»¹
+                // å­¤å„¿å­”æ´ï¼Œä¸ºäº†å†…å­˜å®‰å…¨éœ€è¦å½’è¿˜
                 context.ReturnList(hole);
             }
         }
 
-        tree.Dispose(); // ÊÍ·Å tree ÄÚ²¿µÄÁÙÊ±Êı×é»º´æ
+        tree.Dispose(); // é‡Šæ”¾ tree å†…éƒ¨çš„ä¸´æ—¶æ•°ç»„ç¼“å­˜
 
         return solids;
     }
@@ -354,7 +354,7 @@ public static class SlicerCore
     }
 
     // =================================================================================
-    //                                  ÄÚ²¿Âß¼­ (Í¼ÂÛ & ¼¸ºÎ)
+    //                                  å†…éƒ¨é€»è¾‘ (å›¾è®º & å‡ ä½•)
     // =================================================================================
 
     private static void AddEdge(Dictionary<Vector2, List<Vector2>> graph, Vector2 u, Vector2 v)
@@ -367,7 +367,7 @@ public static class SlicerCore
             graph[u] = neighbors;
         }
 
-        // ±ÜÃâÖØ¸´±ß
+        // é¿å…é‡å¤è¾¹
         bool exists = false;
         int count = neighbors.Count;
         for (int i = 0; i < count; i++)
@@ -381,7 +381,7 @@ public static class SlicerCore
     {
         context.TempRawLoops.Clear();
         context.VisitedEdges.Clear();
-        // Ö±½Ó±éÀú KVP
+        // ç›´æ¥éå† KVP
         foreach (var kvp in graph)
         {
             Vector2 startNode = kvp.Key;
@@ -393,7 +393,7 @@ public static class SlicerCore
                 EdgeKey edgeKey = new EdgeKey(startNode, nextNode);
                 if (context.VisitedEdges.Contains(edgeKey)) continue;
 
-                List<Vector2> currentLoop = context.GetList(); // ³Ø»¯
+                List<Vector2> currentLoop = context.GetList(); // æ± åŒ–
                 Vector2 curr = startNode;
                 Vector2 next = nextNode;
                 currentLoop.Add(curr);
@@ -425,13 +425,13 @@ public static class SlicerCore
 
                 if (loopClosed && currentLoop.Count > 2)
                 {
-                    // ÒÆ³ı±ÕºÏµã
+                    // ç§»é™¤é—­åˆç‚¹
                     currentLoop.RemoveAt(currentLoop.Count - 1);
                     context.TempRawLoops.Add(currentLoop);
                 }
                 else
                 {
-                    // Ê§°ÜµÄÑ­»·£¬¹é»¹ÄÚ´æ
+                    // å¤±è´¥çš„å¾ªç¯ï¼Œå½’è¿˜å†…å­˜
                     context.ReturnList(currentLoop);
                 }
             }
@@ -516,7 +516,7 @@ public static class SlicerCore
                 simplified.Add(path[i]);
         }
 
-        // ¼ì²éÊ×Î²±ÕºÏ
+        // æ£€æŸ¥é¦–å°¾é—­åˆ
         if (simplified.Count > 2 && SqrDist(simplified[0], simplified[simplified.Count - 1]) < MIN_VERT_DIST_SQ)
             simplified.RemoveAt(simplified.Count - 1);
 
@@ -566,9 +566,9 @@ public static class SlicerCore
         private FlatNode[] nodes;
         private int[] indices;
         private int nodesUsed;
-        private List<PolygonData> srcData; // ÒıÓÃ SlicerCore.PolygonData
+        private List<PolygonData> srcData; // å¼•ç”¨ SlicerCore.PolygonData
 
-        // ¼òµ¥µÄÊı×é»º´æ³Ø£¬±ÜÃâÃ¿´Î Build ¶¼ new int[]
+        // ç®€å•çš„æ•°ç»„ç¼“å­˜æ± ï¼Œé¿å…æ¯æ¬¡ Build éƒ½ new int[]
         private static FlatNode[] nodeCache = new FlatNode[64];
         private static int[] indexCache = new int[32];
 
@@ -578,7 +578,7 @@ public static class SlicerCore
             srcData = solids;
             int count = solids.Count;
 
-            // ¶¯Ì¬À©Èİ»º´æ
+            // åŠ¨æ€æ‰©å®¹ç¼“å­˜
             if (nodeCache.Length < count * 2) System.Array.Resize(ref nodeCache, count * 4);
             if (indexCache.Length < count) System.Array.Resize(ref indexCache, count * 2);
 
@@ -592,7 +592,7 @@ public static class SlicerCore
 
         private int BuildRecursive(int start, int count)
         {
-            // Âß¼­ÓëÔ­°æÍêÈ«Ò»ÖÂ£¬Ê¡ÂÔ
+            // é€»è¾‘ä¸åŸç‰ˆå®Œå…¨ä¸€è‡´ï¼Œçœç•¥
             int nodeIndex = nodesUsed++;
             Bounds total = srcData[indices[start]].Bounds;
             for (int i = 1; i < count; i++) total.Encapsulate(srcData[indices[start + i]].Bounds);
@@ -607,7 +607,7 @@ public static class SlicerCore
             nodes[nodeIndex].PolygonIndex = -1;
 
             // ... Partition logic same as original ...
-            // ¼ò»¯µÄ Partition
+            // ç®€åŒ–çš„ Partition
             bool splitX = total.size.x > total.size.y;
             float mid = splitX ? total.center.x : total.center.y;
             int left = start, right = start + count - 1;
@@ -637,7 +637,7 @@ public static class SlicerCore
 
         private PolygonData QueryRecursive(int nodeIdx, Vector2 point, float holeArea)
         {
-            ref FlatNode node = ref nodes[nodeIdx]; // Ê¹ÓÃ ref ¼õÉÙ¿½±´
+            ref FlatNode node = ref nodes[nodeIdx]; // ä½¿ç”¨ ref å‡å°‘æ‹·è´
             if (!node.Box.Contains(new Vector3(point.x, point.y, 0))) return null;
 
             if (node.PolygonIndex != -1)
@@ -669,7 +669,7 @@ public static class SlicerCore
 
         public void Dispose()
         {
-            srcData = null; // ¶Ï¿ªÒıÓÃ
+            srcData = null; // æ–­å¼€å¼•ç”¨
             nodes = null;
             indices = null;
         }

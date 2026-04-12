@@ -2,18 +2,18 @@ using UnityEngine;
 using System.Collections.Generic;
 
 /// <summary>
-/// ¶à±ßĞÎ¿Õ¶´ºÏ²¢Æ÷ (Optimized Hole Merger)
+/// å¤šè¾¹å½¢ç©ºæ´åˆå¹¶å™¨ (Optimized Hole Merger)
 /// <para>
-/// ¹¦ÄÜ£ºÊ¹ÓÃ"´îÇÅ·¨" (Bridge Building) ½«´ø¶´¶à±ßĞÎ×ª»»Îª¼òµ¥¶à±ßĞÎ£¬ÒÔ±ã½øĞĞÈı½ÇÆÊ·Ö¡£
-/// ÓÅ»¯²ßÂÔ£º
-/// 1. ÈÆĞò¹æ·¶»¯£ºÇ¿ÖÆÍâÈ¦ CCW£¬¿×¶´ CW¡£
-/// 2. ¾²Ì¬Ê÷¼ÓËÙ£ºÊ¹ÓÃ NativeAABBTree ½«¼¸ºÎ²éÑ¯´Ó O(N) ½µÖÁ O(log N)¡£
-/// 3. Ë«ÏòÁ´±í£º½«·ìºÏ²Ù×÷´Ó O(N) ÄÚ´æ°áÔË½µÖÁ O(1) Ö¸Õë²Ù×÷¡£
+/// åŠŸèƒ½ï¼šä½¿ç”¨"æ­æ¡¥æ³•" (Bridge Building) å°†å¸¦æ´å¤šè¾¹å½¢è½¬æ¢ä¸ºç®€å•å¤šè¾¹å½¢ï¼Œä»¥ä¾¿è¿›è¡Œä¸‰è§’å‰–åˆ†ã€‚
+/// ä¼˜åŒ–ç­–ç•¥ï¼š
+/// 1. ç»•åºè§„èŒƒåŒ–ï¼šå¼ºåˆ¶å¤–åœˆ CCWï¼Œå­”æ´ CWã€‚
+/// 2. é™æ€æ ‘åŠ é€Ÿï¼šä½¿ç”¨ NativeAABBTree å°†å‡ ä½•æŸ¥è¯¢ä» O(N) é™è‡³ O(log N)ã€‚
+/// 3. åŒå‘é“¾è¡¨ï¼šå°†ç¼åˆæ“ä½œä» O(N) å†…å­˜æ¬è¿é™è‡³ O(1) æŒ‡é’ˆæ“ä½œã€‚
 /// </para>
 /// </summary>
 public class PolygonHoleMerger
 {
-    // Ë«ÏòÁ´±í½Úµã£¬ÓÃÓÚ O(1) ²åÈë
+    // åŒå‘é“¾è¡¨èŠ‚ç‚¹ï¼Œç”¨äº O(1) æ’å…¥
     private class ListNode
     {
         public Vector2 Position;
@@ -22,16 +22,16 @@ public class PolygonHoleMerger
         public ListNode(Vector2 p) { Position = p; }
     }
 
-    // ¿×¶´ÔªÊı¾İ
+    // å­”æ´å…ƒæ•°æ®
     private struct HoleData
     {
         public ListNode Head;
         public int Count;
-        public float MaxX;      // ¹Ø¼ü£ºÓÃÓÚ´Ó×îÓÒ²à¿ªÊ¼ºÏ²¢
+        public float MaxX;      // å…³é”®ï¼šç”¨äºä»æœ€å³ä¾§å¼€å§‹åˆå¹¶
         public ListNode MaxXNode;
     }
 
-    // ¶¯Ì¬Éú³ÉµÄ"ÇÅ"¼ÇÂ¼
+    // åŠ¨æ€ç”Ÿæˆçš„"æ¡¥"è®°å½•
     private struct BridgeSegment
     {
         public Vector2 A;
@@ -39,25 +39,25 @@ public class PolygonHoleMerger
     }
 
     /// <summary>
-    /// ºÏ²¢ºËĞÄÈë¿Ú
+    /// åˆå¹¶æ ¸å¿ƒå…¥å£
     /// </summary>
     public static List<Vector2> Merge(List<Vector2> outRing, List<List<Vector2>> holes)
     {
         if (holes == null || holes.Count == 0) return new List<Vector2>(outRing);
 
-        // 0. ¹æ·¶»¯ÈÆĞò (Winding Order Normalization)
-        // Í¼ĞÎÑ§ÌúÂÉ£ºÍâÊµÄÚĞé -> ÍâÈ¦ÄæÊ±Õë(CCW), ¿×¶´Ë³Ê±Õë(CW)
+        // 0. è§„èŒƒåŒ–ç»•åº (Winding Order Normalization)
+        // å›¾å½¢å­¦é“å¾‹ï¼šå¤–å®å†…è™š -> å¤–åœˆé€†æ—¶é’ˆ(CCW), å­”æ´é¡ºæ—¶é’ˆ(CW)
         EnsureWinding(outRing, true);
         for (int i = 0; i < holes.Count; i++) EnsureWinding(holes[i], false);
 
-        // 1. ¹¹½¨ AABB Ê÷ (°üº¬ËùÓĞÔ­Ê¼±ß£¬×÷Îª¾²Ì¬×èµ²²ã)
+        // 1. æ„å»º AABB æ ‘ (åŒ…å«æ‰€æœ‰åŸå§‹è¾¹ï¼Œä½œä¸ºé™æ€é˜»æŒ¡å±‚)
         NativeAABBTree staticWallTree = new NativeAABBTree();
         staticWallTree.Build(outRing, holes);
 
-        // 2. Á´±í»¯ÍâÈ¦
+        // 2. é“¾è¡¨åŒ–å¤–åœˆ
         ListNode outerHead = CreateLoop(outRing);
 
-        // 3. Ô¤´¦Àí¿×¶´
+        // 3. é¢„å¤„ç†å­”æ´
         List<HoleData> holeDatas = new List<HoleData>(holes.Count);
         for (int i = 0; i < holes.Count; i++)
         {
@@ -66,8 +66,8 @@ public class PolygonHoleMerger
 
             ListNode head = CreateLoop(holePoints);
 
-            // Ñ°ÕÒ X ×ø±ê×î´óµÄµã (MaxX)
-            // ²ßÂÔ£ºÍù×îÓÒ±ß´îÇÅ£¬Í¨³£±»×èµ²µÄ¸ÅÂÊ×îĞ¡
+            // å¯»æ‰¾ X åæ ‡æœ€å¤§çš„ç‚¹ (MaxX)
+            // ç­–ç•¥ï¼šå¾€æœ€å³è¾¹æ­æ¡¥ï¼Œé€šå¸¸è¢«é˜»æŒ¡çš„æ¦‚ç‡æœ€å°
             ListNode curr = head;
             ListNode maxNode = head;
             float maxX = -float.MaxValue;
@@ -86,40 +86,40 @@ public class PolygonHoleMerger
             holeDatas.Add(new HoleData { Head = head, Count = count, MaxX = maxX, MaxXNode = maxNode });
         }
 
-        // 4. ÅÅĞò£ºÓÅÏÈ´¦Àí×îÓÒ±ßµÄ¶´ (O(H log H))
+        // 4. æ’åºï¼šä¼˜å…ˆå¤„ç†æœ€å³è¾¹çš„æ´ (O(H log H))
         holeDatas.Sort((a, b) => b.MaxX.CompareTo(a.MaxX));
 
         List<BridgeSegment> dynamicBridges = new List<BridgeSegment>(holes.Count);
 
-        // 5. Öğ¸öºÏ²¢
+        // 5. é€ä¸ªåˆå¹¶
         foreach (var hole in holeDatas)
         {
             Vector2 M = hole.MaxXNode.Position;
 
-            // Ñ°ÕÒ×î¼ÑÁ¬½Óµã P (O(N_outer * log N_total))
+            // å¯»æ‰¾æœ€ä½³è¿æ¥ç‚¹ P (O(N_outer * log N_total))
             ListNode bestP = FindBestBridgePoint(M, outerHead, staticWallTree, dynamicBridges);
 
             if (bestP != null)
             {
                 Vector2 P = bestP.Position;
-                // ¼ÇÂ¼ĞÂÇÅ£¬·ÀÖ¹ºóĞøµÄ¶´´©¹ıÕâÌõÏß
+                // è®°å½•æ–°æ¡¥ï¼Œé˜²æ­¢åç»­çš„æ´ç©¿è¿‡è¿™æ¡çº¿
                 dynamicBridges.Add(new BridgeSegment { A = M, B = P });
 
-                // Ö´ĞĞÖ¸Õë·ìºÏ (Surgery)
+                // æ‰§è¡ŒæŒ‡é’ˆç¼åˆ (Surgery)
                 StitchLists(bestP, hole.MaxXNode);
             }
             else
             {
-                Debug.LogWarning($"[PolygonHoleMerger] ÎŞ·¨Îª¿×¶´ÕÒµ½ºÏ·¨µÄÇÅ! Mµã: {M}");
+                Debug.LogWarning($"[PolygonHoleMerger] æ— æ³•ä¸ºå­”æ´æ‰¾åˆ°åˆæ³•çš„æ¡¥! Mç‚¹: {M}");
             }
         }
 
-        // 6. »¹Ô­Îª List (O(N))
+        // 6. è¿˜åŸä¸º List (O(N))
         return FlattenList(outerHead);
     }
 
     /// <summary>
-    /// Ñ°ÕÒ×î¼Ñ´îÇÅµã P
+    /// å¯»æ‰¾æœ€ä½³æ­æ¡¥ç‚¹ P
     /// </summary>
     private static ListNode FindBestBridgePoint(
         Vector2 M,
@@ -135,15 +135,15 @@ public class PolygonHoleMerger
         {
             Vector2 P = curr.Position;
 
-            // 1. ¼¸ºÎ·½Ïò¼ôÖ¦£ºÖ»ÕÒÓÒ²àµã (ÅäºÏ MaxX ²ßÂÔ)
+            // 1. å‡ ä½•æ–¹å‘å‰ªæï¼šåªæ‰¾å³ä¾§ç‚¹ (é…åˆ MaxX ç­–ç•¥)
             if (P.x > M.x)
             {
                 float distSq = (P - M).sqrMagnitude;
 
-                // 2. ¾àÀë¼ôÖ¦
+                // 2. è·ç¦»å‰ªæ
                 if (distSq < minDistSq)
                 {
-                    // 3. °º¹óµÄ¿É¼ûĞÔÑéÖ¤ (Query Tree)
+                    // 3. æ˜‚è´µçš„å¯è§æ€§éªŒè¯ (Query Tree)
                     if (IsBridgeValid(M, P, tree, bridges))
                     {
                         minDistSq = distSq;
@@ -158,19 +158,19 @@ public class PolygonHoleMerger
     }
 
     /// <summary>
-    /// ÑéÖ¤ÇÅÊÇ·ñºÏ·¨ (²»×²Ç½¡¢²»×²ÆäËûÇÅ)
+    /// éªŒè¯æ¡¥æ˜¯å¦åˆæ³• (ä¸æ’å¢™ã€ä¸æ’å…¶ä»–æ¡¥)
     /// </summary>
     private static bool IsBridgeValid(Vector2 start, Vector2 end, NativeAABBTree tree, List<BridgeSegment> bridges)
     {
-        // 1. ¼ì²é¾²Ì¬¼¸ºÎÌå (O(log N))
+        // 1. æ£€æŸ¥é™æ€å‡ ä½•ä½“ (O(log N))
         if (tree.Intersects(start, end)) return false;
 
-        // 2. ¼ì²é¶¯Ì¬Éú³ÉµÄÇÅ (O(H) - ¼«Ğ¡³£Êı)
+        // 2. æ£€æŸ¥åŠ¨æ€ç”Ÿæˆçš„æ¡¥ (O(H) - æå°å¸¸æ•°)
         int bridgeCount = bridges.Count;
         for (int i = 0; i < bridgeCount; i++)
         {
             BridgeSegment b = bridges[i];
-            // ÅÅ³ı¹²Ïí¶¥µã
+            // æ’é™¤å…±äº«é¡¶ç‚¹
             if (IsSamePoint(start, b.A) || IsSamePoint(start, b.B) ||
                 IsSamePoint(end, b.A) || IsSamePoint(end, b.B)) continue;
 
@@ -180,48 +180,48 @@ public class PolygonHoleMerger
     }
 
     /// <summary>
-    /// ºËĞÄ·ìºÏÂß¼­£º½«¿×¶´Á´±í½ÓÈëÍâÈ¦Á´±í
+    /// æ ¸å¿ƒç¼åˆé€»è¾‘ï¼šå°†å­”æ´é“¾è¡¨æ¥å…¥å¤–åœˆé“¾è¡¨
     /// </summary>
-    /// <param name="nodeP">ÍâÈ¦ÉÏµÄÁ¬½Óµã P</param>
-    /// <param name="nodeM">¿×¶´ÉÏµÄÆğÊ¼µã M</param>
+    /// <param name="nodeP">å¤–åœˆä¸Šçš„è¿æ¥ç‚¹ P</param>
+    /// <param name="nodeM">å­”æ´ä¸Šçš„èµ·å§‹ç‚¹ M</param>
     private static void StitchLists(ListNode nodeP, ListNode nodeM)
     {
-        // Ä¿±êÍØÆË£º ... -> P -> M -> (Hole Loop) -> M' -> P' -> P_Next ...
-        // P -> M ÊÇ½ø¶´£¬M' -> P' ÊÇ³ö¶´
+        // ç›®æ ‡æ‹“æ‰‘ï¼š ... -> P -> M -> (Hole Loop) -> M' -> P' -> P_Next ...
+        // P -> M æ˜¯è¿›æ´ï¼ŒM' -> P' æ˜¯å‡ºæ´
 
-        // 1. »º´æ¹Ø¼üÁ¬½Óµã
+        // 1. ç¼“å­˜å…³é”®è¿æ¥ç‚¹
         ListNode pNext = nodeP.Next;
-        ListNode mPrev = nodeM.Prev; // ¿×¶´µÄÂß¼­Î²²¿
+        ListNode mPrev = nodeM.Prev; // å­”æ´çš„é€»è¾‘å°¾éƒ¨
 
-        // 2. ´´½¨»Ø³Ì½Úµã¸±±¾ (Ä£Äâ¼¸ºÎÖØºÏµ«ÍØÆË²»Í¬µÄ±ß)
+        // 2. åˆ›å»ºå›ç¨‹èŠ‚ç‚¹å‰¯æœ¬ (æ¨¡æ‹Ÿå‡ ä½•é‡åˆä½†æ‹“æ‰‘ä¸åŒçš„è¾¹)
         ListNode copyM = new ListNode(nodeM.Position); // M'
         ListNode copyP = new ListNode(nodeP.Position); // P'
 
-        // 3. Ö¸ÕëÖØÁ¬
+        // 3. æŒ‡é’ˆé‡è¿
 
-        // Step A: ÍâÈ¦ P -> ¿×¶´ M
+        // Step A: å¤–åœˆ P -> å­”æ´ M
         nodeP.Next = nodeM;
         nodeM.Prev = nodeP;
 
-        // Step B: ¿×¶´Î² Z -> M' (½«±Õ»·¶Ï¿ª²¢Ö¸Ïò¸±±¾)
+        // Step B: å­”æ´å°¾ Z -> M' (å°†é—­ç¯æ–­å¼€å¹¶æŒ‡å‘å‰¯æœ¬)
         mPrev.Next = copyM;
         copyM.Prev = mPrev;
 
-        // Step C: M' -> P' (³ö¶´ÇÅ)
+        // Step C: M' -> P' (å‡ºæ´æ¡¥)
         copyM.Next = copyP;
         copyP.Prev = copyM;
 
-        // Step D: P' -> ÍâÈ¦ P_Next (»Ø¹éÖ÷Â·)
+        // Step D: P' -> å¤–åœˆ P_Next (å›å½’ä¸»è·¯)
         copyP.Next = pNext;
         pNext.Prev = copyP;
     }
 
-    // Ç¿ÖÆĞŞÕıÈÆĞò (Ãæ»ı·¨)
+    // å¼ºåˆ¶ä¿®æ­£ç»•åº (é¢ç§¯æ³•)
     private static void EnsureWinding(List<Vector2> points, bool targetCCW)
     {
         if (points == null || points.Count < 3) return;
 
-        double area = 0; // double ·ÀÖ¹ÀÛ¼ÓÒç³ö
+        double area = 0; // double é˜²æ­¢ç´¯åŠ æº¢å‡º
         for (int i = 0; i < points.Count; i++)
         {
             Vector2 p1 = points[i];
@@ -229,7 +229,7 @@ public class PolygonHoleMerger
             area += (p2.x - p1.x) * (p2.y + p1.y);
         }
 
-        // ÌİĞÎ¹«Ê½£ºArea < 0 Îª CCW
+        // æ¢¯å½¢å…¬å¼ï¼šArea < 0 ä¸º CCW
         bool isCCW = area < 0;
         if (isCCW != targetCCW)
         {
@@ -266,9 +266,9 @@ public class PolygonHoleMerger
             result.Add(curr.Position);
             curr = curr.Next;
             safety++;
-            if (safety > 100000) // ËÀÑ­»·±£»¤
+            if (safety > 100000) // æ­»å¾ªç¯ä¿æŠ¤
             {
-                Debug.LogError("[PolygonHoleMerger] FlattenList ¼ì²âµ½ÎŞÏŞÑ­»·£¬Ç¿ÖÆÖĞ¶Ï¡£");
+                Debug.LogError("[PolygonHoleMerger] FlattenList æ£€æµ‹åˆ°æ— é™å¾ªç¯ï¼Œå¼ºåˆ¶ä¸­æ–­ã€‚");
                 break;
             }
         } while (curr != head);

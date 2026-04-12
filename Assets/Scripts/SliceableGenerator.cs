@@ -3,22 +3,22 @@ using System.Collections.Generic;
 
 public class SliceableGenerator : MonoBehaviour
 {
-    [Tooltip("ÊÇ·ñÔÚ¿ªÊ¼ÔËĞĞÊ±×Ô¶¯Éú³ÉMesh")]
+    [Tooltip("æ˜¯å¦åœ¨å¼€å§‹è¿è¡Œæ—¶è‡ªåŠ¨ç”ŸæˆMesh")]
     public bool autoGenerateOnStart = true;
 
-    [Tooltip("ÎïÀí²ÄÖÊ")]
+    [Tooltip("ç‰©ç†æè´¨")]
     public PhysicsMaterial2D physicsMaterial;
 
-    // UV ²ÎÕÕÊı¾İ (ºÚÏ»×Ó)
-    // ÕâĞ©Êı¾İÓÃÓÚ¸æËß Slicer£¬ÎŞÂÛÎïÌå±»ÇĞµÃ¶àĞ¡£¬
-    // ¶¼Òª°´ÕÕÕâ¸öÔ­Ê¼¾ØĞÎÀ´¼ÆËã UV£¬·ÀÖ¹ÌùÍ¼´íÎ»¡£
-    
+    // UV å‚ç…§æ•°æ® (é»‘åŒ£å­)
+    // è¿™äº›æ•°æ®ç”¨äºå‘Šè¯‰ Slicerï¼Œæ— è®ºç‰©ä½“è¢«åˆ‡å¾—å¤šå°ï¼Œ
+    // éƒ½è¦æŒ‰ç…§è¿™ä¸ªåŸå§‹çŸ©å½¢æ¥è®¡ç®— UVï¼Œé˜²æ­¢è´´å›¾é”™ä½ã€‚
+
     [HideInInspector] public bool hasUVReference = false;
     [HideInInspector] public Rect uvReferenceRect;
 
     void Start()
     {
-        // Èç¹ûÒÑ¾­ÓĞÒıÓÃÊı¾İ£¨ËµÃ÷ÊÇÇĞ³öÀ´µÄËéÆ¬£©£¬¾Í²»ÒªÔÙ×Ô¶¯Éú³ÉÁË
+        // å¦‚æœå·²ç»æœ‰å¼•ç”¨æ•°æ®ï¼ˆè¯´æ˜æ˜¯åˆ‡å‡ºæ¥çš„ç¢ç‰‡ï¼‰ï¼Œå°±ä¸è¦å†è‡ªåŠ¨ç”Ÿæˆäº†
         if (hasUVReference) return;
 
         if (autoGenerateOnStart)
@@ -31,25 +31,25 @@ public class SliceableGenerator : MonoBehaviour
     public void GenerateSliceable()
     {
         SpriteRenderer sr = GetComponent<SpriteRenderer>();
-        // Èç¹ûÒÑ¾­ÊÇ Mesh ¶ÔÏóÇÒÓĞ²ÎÕÕÊı¾İ£¬Ìø¹ı
+        // å¦‚æœå·²ç»æ˜¯ Mesh å¯¹è±¡ä¸”æœ‰å‚ç…§æ•°æ®ï¼Œè·³è¿‡
         if (sr == null && GetComponent<MeshRenderer>() != null)
         {
             return;
         }
         if (sr == null || sr.sprite == null) return;
 
-        // 1. »º´æ¹Ø¼üÊı¾İ
+        // 1. ç¼“å­˜å…³é”®æ•°æ®
         Texture2D spriteTexture = sr.sprite.texture;
         Color spriteColor = sr.color;
         Bounds spriteBounds = sr.sprite.bounds;
         string spriteName = sr.sprite.name;
 
-        // [ºËĞÄ]£º¼ÇÂ¼Ô­Ê¼ UV ²ÎÕÕÏµ (Local Space Bounds)
-        // x, y ÊÇ×îĞ¡µã£¬width, height ÊÇ³ß´ç
+        // [æ ¸å¿ƒ]ï¼šè®°å½•åŸå§‹ UV å‚ç…§ç³» (Local Space Bounds)
+        // x, y æ˜¯æœ€å°ç‚¹ï¼Œwidth, height æ˜¯å°ºå¯¸
         uvReferenceRect = new Rect(spriteBounds.min.x, spriteBounds.min.y, spriteBounds.size.x, spriteBounds.size.y);
         hasUVReference = true;
 
-        // ÌáÈ¡ Collider Â·¾¶
+        // æå– Collider è·¯å¾„
         PolygonCollider2D polyCol = GetComponent<PolygonCollider2D>();
         if (polyCol == null)
         {
@@ -66,10 +66,10 @@ public class SliceableGenerator : MonoBehaviour
             }
         }
 
-        // 2. Á¢¼´Ïú»Ù SpriteRenderer
+        // 2. ç«‹å³é”€æ¯ SpriteRenderer
         DestroyImmediate(sr);
 
-        // 3. Éú³É Mesh
+        // 3. ç”Ÿæˆ Mesh
         List<Vector2> mergedVertices = PolygonHoleMerger.Merge(outerLoop, holes);
         int[] triangles = Triangulator.Triangulate(mergedVertices.ToArray());
 
@@ -77,7 +77,7 @@ public class SliceableGenerator : MonoBehaviour
         Vector3[] vertices = new Vector3[mergedVertices.Count];
         Vector2[] uvs = new Vector2[mergedVertices.Count];
 
-        // Ê¹ÓÃ¸Õ¸Õ¼ÇÂ¼µÄ uvReferenceRect À´¼ÆËã UV
+        // ä½¿ç”¨åˆšåˆšè®°å½•çš„ uvReferenceRect æ¥è®¡ç®— UV
         float width = uvReferenceRect.width;
         float height = uvReferenceRect.height;
         float minX = uvReferenceRect.x;
@@ -87,7 +87,7 @@ public class SliceableGenerator : MonoBehaviour
         {
             vertices[i] = mergedVertices[i];
 
-            // ¼ÆËã UV (Ê¼ÖÕÏà¶ÔÓÚÔ­Ê¼°üÎ§ºĞ)
+            // è®¡ç®— UV (å§‹ç»ˆç›¸å¯¹äºåŸå§‹åŒ…å›´ç›’)
             float u = (mergedVertices[i].x - minX) / width;
             float v = (mergedVertices[i].y - minY) / height;
             uvs[i] = new Vector2(u, v);
@@ -99,7 +99,7 @@ public class SliceableGenerator : MonoBehaviour
         mesh.RecalculateNormals();
         mesh.name = spriteName + "_GeneratedMesh";
 
-        // 4. Ìí¼ÓĞÂ×é¼ş
+        // 4. æ·»åŠ æ–°ç»„ä»¶
         MeshFilter mf = GetComponent<MeshFilter>();
         if (mf == null) mf = gameObject.AddComponent<MeshFilter>();
         mf.mesh = mesh;
@@ -125,6 +125,6 @@ public class SliceableGenerator : MonoBehaviour
             if (physicsMaterial != null) rb.sharedMaterial = physicsMaterial;
         }
 
-        Debug.Log($"[SliceableGenerator] ³É¹¦×ª»»²¢¼ÇÂ¼ UV ²ÎÕÕ£º{name}");
+        Debug.Log($"[SliceableGenerator] æˆåŠŸè½¬æ¢å¹¶è®°å½• UV å‚ç…§ï¼š{name}");
     }
 }
