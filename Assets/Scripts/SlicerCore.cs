@@ -8,7 +8,7 @@ using Unity.Mathematics;
 using System.Diagnostics;
 
 // 这是一个纯静态的计算核心，不依赖 GameObject 实例化
-public static class SlicerCore
+public static partial class SlicerCore
 {
     // =================================================================================
     //                                  内存池与上下文
@@ -179,76 +179,8 @@ public static class SlicerCore
         public int SegmentIndex;
     }
 
-    public struct CutSegment
-    {
-        public Vector2 P1;
-        public Vector2 P2;
-    }
-
-    public struct CutHitResult
-    {
-        public bool Hit;
-        public Vector2 Point;
-        public float T;
-    }
-
-    [BurstCompile]
-    public struct LineIntersectionJob : IJobParallelFor
-    {
-        [ReadOnly] public NativeArray<CutSegment> Segments;
-        public Vector2 SliceStart;
-        public Vector2 SliceEnd;
-
-        [WriteOnly] public NativeArray<CutHitResult> Results;
-
-        public void Execute(int index)
-        {
-            Vector2 p1 = Segments[index].P1;
-            Vector2 p2 = Segments[index].P2;
-
-            CutHitResult res = new CutHitResult();
-            res.Hit = false;
-
-            // 切线作为基准分隔平面
-            Vector2 dir = SliceEnd - SliceStart;
-            float lenSq = dir.x * dir.x + dir.y * dir.y;
-            if (lenSq < 1e-8f)
-            {
-                Results[index] = res;
-                return;
-            }
-
-            Vector2 normal = new Vector2(-dir.y, dir.x);
-
-            // 求符号距离，大于 0 为超平面左方阵营，小于 0 为右方阵营
-            float dist1 = math.dot(normal, p1 - SliceStart);
-            float dist2 = math.dot(normal, p2 - SliceStart);
-
-            // 将绝对距离挤压为绝对符号。> 0 和 <= 0 是极其核心的排爆墙！
-            // 它强行规定哪怕正好摩擦在刀口（dist == 0），也会被强制分配到右侧阵营(-1)
-            // 如此这般，相邻的两条边产生同擦点时，只有一条边能触发“跨域”，保证只输出 1 个且唯一 1 个合法交点。
-            int sign1 = dist1 > 0f ? 1 : -1;
-            int sign2 = dist2 > 0f ? 1 : -1;
-
-            if (sign1 != sign2)
-            {
-                // 等比计算交点
-                float u = dist1 / (dist1 - dist2);
-                Vector2 intersection = p1 + u * (p2 - p1);
-
-                // 将该交点投影在切割线上的绝对长度进度 T (用于极速排序)
-                float t = math.dot(intersection - SliceStart, dir) / lenSq;
-
-                if (t >= -1e-5f && t <= 1f + 1e-5f)
-                {
-                    res.Hit = true;
-                    res.T = t;
-                    res.Point = intersection;
-                }
-            }
-            Results[index] = res;
-        }
-    }
+    // CutSegment, CutHitResult, LineIntersectionJob, CurveIntersectionJob,
+    // CurvePathHitsComparer, CurveGlobalTComparer 均已迁移至 SlicerJobs.cs (partial class)
 
     // =================================================================================
     //                                  对外计算接口
@@ -504,61 +436,123 @@ public static class SlicerCore
         int cutSegCount = cutPath.Count - 1;
         if (cutSegCount < 1) return null;
 
-        // --- Phase 1: 多段线 vs 多边形边界的全量碰撞 ---
-        // 收集所有交点，并为每个交点计算"全局 T"参数（沿曲线的排序键）
+        // --- Phase 1: 多段线 vs 多边形边界的全量碰撞 (Job/Burst 并行化) ---
         // 全局 T = cutSegmentIndex + localT
-
-        // 临时结构：存储交点与其在多边形边上的位置以及在曲线上的全局位置
         List<CurveIntersectionInfo> allHits = new List<CurveIntersectionInfo>(64);
+
+        // 预计算总碰撞对数，决定是否启用 Job
+        int totalPairs = 0;
+        for (int pi = 0; pi < originalPaths.Count; pi++)
+            totalPairs += originalPaths[pi].Count * cutSegCount;
+
+        bool useCurveJob = totalPairs > 64;
+        NativeArray<CurvePair> jobPairs = default;
+        NativeArray<CurveHitResult> jobResults = default;
+
+        try
+        {
+        // 填充 Job 输入数据
+        if (useCurveJob)
+        {
+            jobPairs = new NativeArray<CurvePair>(totalPairs, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            jobResults = new NativeArray<CurveHitResult>(totalPairs, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+
+            int offset = 0;
+            for (int pId = 0; pId < originalPaths.Count; pId++)
+            {
+                var p = originalPaths[pId];
+                int pCount = p.Count;
+                for (int edgeIdx = 0; edgeIdx < pCount; edgeIdx++)
+                {
+                    Vector2 eA = p[edgeIdx];
+                    Vector2 eB = p[(edgeIdx + 1) % pCount];
+                    for (int cutIdx = 0; cutIdx < cutSegCount; cutIdx++)
+                    {
+                        jobPairs[offset++] = new CurvePair
+                        {
+                            EdgeA = eA, EdgeB = eB,
+                            CutA = cutPath[cutIdx], CutB = cutPath[cutIdx + 1],
+                            PathId = pId, EdgeIdx = edgeIdx, CutIdx = cutIdx
+                        };
+                    }
+                }
+            }
+
+            new CurveIntersectionJob { Pairs = jobPairs, Results = jobResults }
+                .Schedule(totalPairs, 64).Complete();
+        }
+
+        // 按路径收集交点结果
+        int jobOffset = 0;
+        CurvePathHitsComparer pathHitsComparer = new CurvePathHitsComparer();
 
         for (int pId = 0; pId < originalPaths.Count; pId++)
         {
             var path = originalPaths[pId];
             int pCount = path.Count;
 
-            // 收集本路径上所有的交点
             List<CurveIntersectionInfo> pathHits = new List<CurveIntersectionInfo>(32);
 
-            for (int edgeIdx = 0; edgeIdx < pCount; edgeIdx++)
+            if (useCurveJob)
             {
-                Vector2 edgeA = path[edgeIdx];
-                Vector2 edgeB = path[(edgeIdx + 1) % pCount];
-
-                for (int cutIdx = 0; cutIdx < cutSegCount; cutIdx++)
+                // 从 Job 结果中收集本路径的命中
+                int pathPairCount = pCount * cutSegCount;
+                for (int i = 0; i < pathPairCount; i++)
                 {
-                    Vector2 cutA = cutPath[cutIdx];
-                    Vector2 cutB = cutPath[cutIdx + 1];
-
-                    if (SlicerMath.SegmentSegmentIntersect(edgeA, edgeB, cutA, cutB,
-                        out Vector2 intersection, out float tEdge, out float tCut))
+                    CurveHitResult r = jobResults[jobOffset + i];
+                    if (r.Hit)
                     {
-                        float globalT = cutIdx + tCut;
-                        // 叉积判定穿越方向：cross(edgeDir, cutDir) > 0 → 进入实体
-                        // 对 CCW 外圈和 CW 孔洞均成立（实体始终在有向边的左侧）
-                        Vector2 edir = edgeB - edgeA;
-                        Vector2 cdir = cutB - cutA;
-                        float crossVal = edir.x * cdir.y - edir.y * cdir.x;
-                        bool isEntry = crossVal > 0;
-
                         pathHits.Add(new CurveIntersectionInfo
                         {
-                            Point = intersection,
-                            GlobalT = globalT,
-                            SegmentIndex = edgeIdx,
-                            LocalTOnEdge = tEdge,
-                            PathId = pId,
-                            IsEntry = isEntry
+                            Point = r.Point,
+                            GlobalT = r.GlobalT,
+                            SegmentIndex = r.EdgeIdx,
+                            LocalTOnEdge = r.LocalTOnEdge,
+                            PathId = r.PathId,
+                            IsEntry = r.IsEntry
                         });
+                    }
+                }
+                jobOffset += pathPairCount;
+            }
+            else
+            {
+                // 小规模回退：主线程串行检测
+                for (int edgeIdx = 0; edgeIdx < pCount; edgeIdx++)
+                {
+                    Vector2 edgeA = path[edgeIdx];
+                    Vector2 edgeB = path[(edgeIdx + 1) % pCount];
+
+                    for (int cutIdx = 0; cutIdx < cutSegCount; cutIdx++)
+                    {
+                        Vector2 cutA = cutPath[cutIdx];
+                        Vector2 cutB = cutPath[cutIdx + 1];
+
+                        if (SlicerMath.SegmentSegmentIntersect(edgeA, edgeB, cutA, cutB,
+                            out Vector2 intersection, out float tEdge, out float tCut))
+                        {
+                            float globalT = cutIdx + tCut;
+                            Vector2 edir = edgeB - edgeA;
+                            Vector2 cdir = cutB - cutA;
+                            float crossVal = edir.x * cdir.y - edir.y * cdir.x;
+                            bool isEntry = crossVal > 0;
+
+                            pathHits.Add(new CurveIntersectionInfo
+                            {
+                                Point = intersection,
+                                GlobalT = globalT,
+                                SegmentIndex = edgeIdx,
+                                LocalTOnEdge = tEdge,
+                                PathId = pId,
+                                IsEntry = isEntry
+                            });
+                        }
                     }
                 }
             }
 
             // 按照 SegmentIndex 排序（主键），同 SegmentIndex 下按 LocalTOnEdge 排序（副键）
-            pathHits.Sort((a, b) =>
-            {
-                if (a.SegmentIndex != b.SegmentIndex) return a.SegmentIndex.CompareTo(b.SegmentIndex);
-                return a.LocalTOnEdge.CompareTo(b.LocalTOnEdge);
-            });
+            pathHits.Sort(pathHitsComparer);
 
             // 重建多边形路径（插入交点）
             context.TempNewPath.Clear();
@@ -609,13 +603,20 @@ public static class SlicerCore
             {
                 AddEdge(graph, newPathVertices[i], newPathVertices[(i + 1) % newPathVertices.Count]);
             }
+        } // end per-path loop
+
+        } // end try
+        finally
+        {
+            if (jobPairs.IsCreated) jobPairs.Dispose();
+            if (jobResults.IsCreated) jobResults.Dispose();
         }
 
         // --- Phase 2: 按全局 T 排序，使用 Entry/Exit 智能配对缝合曲线内壁 ---
         if (cutIntersections.Count < 2) return null;
 
-        // 按全局 T 排序 allHits
-        allHits.Sort((a, b) => a.GlobalT.CompareTo(b.GlobalT));
+        // 按全局 T 排序 allHits（零 GC IComparer）
+        allHits.Sort(new CurveGlobalTComparer());
 
         // 深度追踪配对：depth=0 表示在空气中，depth>0 表示在实体中
         // cross(edgeDir, cutDir) > 0 的交点为 ENTRY（进入实体），< 0 为 EXIT（离开实体）

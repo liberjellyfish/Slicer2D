@@ -1,7 +1,7 @@
 using UnityEngine;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
-
+//暂时弃用的数据结构，当前算法已相当完备不需要借助并查集分离
 public static class MeshSeparator
 {
     //并查集数据结构
