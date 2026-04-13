@@ -207,13 +207,7 @@ public class MouseSlicer : MonoBehaviour
         bool isNaturallyClosed = SlicerMath.IsClosedLoop(simplified);
         bool isClosed = isSelfIntersecting || isNaturallyClosed;
 
-        // [临时补丁] 暂时禁止任何闭合环的切割逻辑
-        // TODO: 等待分析复杂曲面（自交、桥重叠等）的报错原因后，再重新开放
-        if (isClosed)
-        {
-            Debug.LogWarning("[曲线切割] 检测到闭合回路，该功能由于存在复杂的拓扑退化 Bug，已被暂时禁用以待修缮！");
-            return;
-        }
+        // [方案 A 已实施] 闭合环切割已通过 Entry/Exit 智能配对修复，不再需要冻结
 
         Debug.Log($"[曲线切割] 提交统一贯穿切割 ({simplified.Count} 点, 闭合: {isClosed})");
 

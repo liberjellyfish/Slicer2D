@@ -110,6 +110,76 @@ public static class Slicer
 
         bool isPureHolePunch = false;
 
+        // === Step A: 对非闭合路径——射线收敛检测 或 标准延长 ===
+        if (!isClosed)
+        {
+            float extensionLength = Mathf.Max(referenceRect.width, referenceRect.height) * 1.5f + 1.0f;
+
+            int last = localCutPath.Count - 1;
+            Vector2 headDir = (localCutPath[1] - localCutPath[0]).normalized;
+            Vector2 tailDir = (localCutPath[last] - localCutPath[last - 1]).normalized;
+
+            // --- 射线收敛检测 (Ray Convergence) ---
+            // 检测头部反向射线与尾部正向射线是否会在前方交汇。
+            // 场景：玩家在多边形内部画了一条 V 形的"几乎闭合"路径，
+            // 两端延长线必然在多边形外部交汇。此时应视为闭环，而非开放切割。
+            // 标准有限延长可能不够长无法让线段实际相交，但射线检测不受长度限制。
+            if (headDir != Vector2.zero && tailDir != Vector2.zero && localCutPath.Count >= 3)
+            {
+                Vector2 headRayDir = -headDir; // P0 的反向延长方向
+                Vector2 tailRayDir = tailDir;   // PN 的正向延长方向
+
+                // 射线相交公式：P0 + t * headRayDir = PN + s * tailRayDir
+                // 利用叉积求解参数 t, s
+                float crossRS = headRayDir.x * tailRayDir.y - headRayDir.y * tailRayDir.x;
+
+                if (Mathf.Abs(crossRS) > 1e-6f) // 非平行
+                {
+                    Vector2 diff = localCutPath[last] - localCutPath[0];
+                    float t = (diff.x * tailRayDir.y - diff.y * tailRayDir.x) / crossRS;
+                    float s = (diff.x * headRayDir.y - diff.y * headRayDir.x) / crossRS;
+
+                    // t > 0 且 s > 0：两条射线收敛（非发散），确实会在前方交汇
+                    // 距离上限：防止近平行线产生极远交汇点导致退化（cap = 标准延长的 5 倍）
+                    float maxRayDist = extensionLength * 5f;
+                    if (t > 1e-4f && s > 1e-4f && t < maxRayDist && s < maxRayDist)
+                    {
+                        Vector2 meetPoint = localCutPath[0] + t * headRayDir;
+
+                        // 将切割路径闭合为 [meetPoint, P0, P1, ..., PN, meetPoint]
+                        localCutPath.Insert(0, meetPoint);
+                        localCutPath.Add(meetPoint);
+                        isClosed = true;
+
+                        Debug.Log($"[Slicer] 射线收敛闭合: 交汇点 {meetPoint}, 头距 t={t:F3}, 尾距 s={s:F3}");
+                    }
+                }
+            }
+
+            // --- 标准延长（仅当射线收敛未触发时执行） ---
+            if (!isClosed)
+            {
+                if (headDir != Vector2.zero)
+                {
+                    localCutPath[0] = localCutPath[0] - headDir * extensionLength;
+                }
+
+                int lastIdx = localCutPath.Count - 1;
+                if (tailDir != Vector2.zero)
+                {
+                    localCutPath[lastIdx] = localCutPath[lastIdx] + tailDir * extensionLength;
+                }
+
+                // 延长后自交检测（兜底：标准延长足够长时也能捕获自交闭环）
+                if (SlicerMath.DetectAndResolveSelfIntersection(localCutPath, out List<Vector2> postExtLoop))
+                {
+                    isClosed = true;
+                    Debug.Log($"[Slicer] 延长后检测到自交闭环，已提取环 ({localCutPath.Count} 点)，切换为闭环模式");
+                }
+            }
+        }
+
+        // === Step B: 对闭合路径（包括延长后新发现的闭合）执行虚空自旋 ===
         if (isClosed)
         {
             // --- 虚空自旋算法 (Shift & Boolean) ---
@@ -144,12 +214,14 @@ public static class Slicer
                 {
                     Vector2 p0 = localCutPath[i];
                     Vector2 p1 = localCutPath[i + 1];
-                    for (int s = 1; s <= 4; s++)
+                    // 自适应采样：按固定间距（0.05 单位）采样，防止长线段漏检虚空
+                    float segLen = Vector2.Distance(p0, p1);
+                    int samples = Mathf.Max(4, Mathf.CeilToInt(segLen / 0.05f));
+                    for (int s = 1; s < samples; s++)
                     {
-                        Vector2 mid = Vector2.Lerp(p0, p1, s / 5f);
+                        Vector2 mid = Vector2.Lerp(p0, p1, (float)s / samples);
                         if (IsPointInEmptySpace(mid))
                         {
-                            // 发现切透点！将此采样点注入为真实的路径拐点
                             localCutPath.Insert(i + 1, mid);
                             emptySpaceIndex = i + 1;
                             break;
@@ -175,26 +247,6 @@ public static class Slicer
                 
                 rotated.Add(rotated[0]); // 重新完美闭合
                 localCutPath = rotated;
-            }
-        }
-        else
-        {
-            // 延长头尾切线，确保纯开放曲线完全穿透包围盒
-            float extensionLength = Mathf.Max(referenceRect.width, referenceRect.height) * 1.5f + 1.0f;
-
-            // 头部延长：沿第一条线段的反方向
-            Vector2 headDir = (localCutPath[1] - localCutPath[0]).normalized;
-            if (headDir != Vector2.zero)
-            {
-                localCutPath[0] = localCutPath[0] - headDir * extensionLength;
-            }
-
-            // 尾部延长：沿最后一条线段的正方向
-            int last = localCutPath.Count - 1;
-            Vector2 tailDir = (localCutPath[last] - localCutPath[last - 1]).normalized;
-            if (tailDir != Vector2.zero)
-            {
-                localCutPath[last] = localCutPath[last] + tailDir * extensionLength;
             }
         }
 

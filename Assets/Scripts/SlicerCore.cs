@@ -533,13 +533,21 @@ public static class SlicerCore
                         out Vector2 intersection, out float tEdge, out float tCut))
                     {
                         float globalT = cutIdx + tCut;
+                        // 叉积判定穿越方向：cross(edgeDir, cutDir) > 0 → 进入实体
+                        // 对 CCW 外圈和 CW 孔洞均成立（实体始终在有向边的左侧）
+                        Vector2 edir = edgeB - edgeA;
+                        Vector2 cdir = cutB - cutA;
+                        float crossVal = edir.x * cdir.y - edir.y * cdir.x;
+                        bool isEntry = crossVal > 0;
+
                         pathHits.Add(new CurveIntersectionInfo
                         {
                             Point = intersection,
                             GlobalT = globalT,
                             SegmentIndex = edgeIdx,
                             LocalTOnEdge = tEdge,
-                            PathId = pId
+                            PathId = pId,
+                            IsEntry = isEntry
                         });
                     }
                 }
@@ -578,7 +586,8 @@ public static class SlicerCore
                             GlobalT = pathHits[hitIdx].GlobalT,
                             SegmentIndex = pathHits[hitIdx].SegmentIndex,
                             LocalTOnEdge = pathHits[hitIdx].LocalTOnEdge,
-                            PathId = pId
+                            PathId = pId,
+                            IsEntry = pathHits[hitIdx].IsEntry
                         });
                     }
                     else
@@ -602,50 +611,75 @@ public static class SlicerCore
             }
         }
 
-        // --- Phase 2: 按全局 T 排序，配对 Entry/Exit，缝合曲线内壁 ---
+        // --- Phase 2: 按全局 T 排序，使用 Entry/Exit 智能配对缝合曲线内壁 ---
         if (cutIntersections.Count < 2) return null;
 
         // 按全局 T 排序 allHits
         allHits.Sort((a, b) => a.GlobalT.CompareTo(b.GlobalT));
 
-        int validCount = (allHits.Count % 2 == 0) ? allHits.Count : allHits.Count - 1;
-        for (int i = 0; i < validCount; i += 2)
+        // 深度追踪配对：depth=0 表示在空气中，depth>0 表示在实体中
+        // cross(edgeDir, cutDir) > 0 的交点为 ENTRY（进入实体），< 0 为 EXIT（离开实体）
+        // 当切割线穿越孔洞时，自然产生 EXIT(孔界) → ENTRY(孔界) 的中间过渡，
+        // 深度计数器会正确地在 0 和 1 之间跳转，确保只缝合"在实体内"的曲线段。
+        int depth = 0;
+        int entryHitIdx = -1;
+
+        for (int i = 0; i < allHits.Count; i++)
         {
-            Vector2 entry = allHits[i].Point;
-            Vector2 exit = allHits[i + 1].Point;
-
-            float entryT = allHits[i].GlobalT;
-            float exitT = allHits[i + 1].GlobalT;
-
-            if (SqrDist(entry, exit) < MIN_VERT_DIST_SQ) continue;
-
-            // 收集曲线在 entry 和 exit 之间经过的内部路径点
-            int startCutSeg = Mathf.CeilToInt(entryT);   // 入刀后的第一个完整节点索引
-            int endCutSeg = Mathf.FloorToInt(exitT);      // 出刀前的最后一个完整节点索引
-
-            // 正向缝合（Entry → 内部曲线节点 → Exit）
-            List<Vector2> forwardWall = new List<Vector2>();
-            forwardWall.Add(entry);
-            for (int k = startCutSeg; k <= endCutSeg && k < cutPath.Count; k++)
+            if (allHits[i].IsEntry)
             {
-                if (SqrDist(forwardWall[forwardWall.Count - 1], cutPath[k]) > MIN_VERT_DIST_SQ &&
-                    SqrDist(cutPath[k], exit) > MIN_VERT_DIST_SQ)
+                depth++;
+                if (depth == 1) entryHitIdx = i; // 刚进入实体，记录入口
+            }
+            else
+            {
+                if (depth > 0)
                 {
-                    forwardWall.Add(cutPath[k]);
+                    depth--;
+                    if (depth == 0 && entryHitIdx >= 0)
+                    {
+                        // 配对完成：从 entryHitIdx 到 i 的切割线段在实体内部，需要缝合内壁
+                        Vector2 entry = allHits[entryHitIdx].Point;
+                        Vector2 exit = allHits[i].Point;
+
+                        if (SqrDist(entry, exit) >= MIN_VERT_DIST_SQ)
+                        {
+                            float entryT = allHits[entryHitIdx].GlobalT;
+                            float exitT = allHits[i].GlobalT;
+
+                            int startCutSeg = Mathf.CeilToInt(entryT);
+                            int endCutSeg = Mathf.FloorToInt(exitT);
+
+                            // 正向缝合（Entry → 内部曲线节点 → Exit）
+                            List<Vector2> forwardWall = new List<Vector2>();
+                            forwardWall.Add(entry);
+                            for (int k = startCutSeg; k <= endCutSeg && k < cutPath.Count; k++)
+                            {
+                                if (SqrDist(forwardWall[forwardWall.Count - 1], cutPath[k]) > MIN_VERT_DIST_SQ &&
+                                    SqrDist(cutPath[k], exit) > MIN_VERT_DIST_SQ)
+                                {
+                                    forwardWall.Add(cutPath[k]);
+                                }
+                            }
+                            forwardWall.Add(exit);
+
+                            // 正向边
+                            for (int k = 0; k < forwardWall.Count - 1; k++)
+                            {
+                                AddEdge(graph, forwardWall[k], forwardWall[k + 1]);
+                            }
+
+                            // 反向边 (Exit → 内部曲线节点逆序 → Entry)
+                            for (int k = forwardWall.Count - 1; k > 0; k--)
+                            {
+                                AddEdge(graph, forwardWall[k], forwardWall[k - 1]);
+                            }
+                        }
+                        entryHitIdx = -1;
+                    }
                 }
-            }
-            forwardWall.Add(exit);
-
-            // 正向边
-            for (int k = 0; k < forwardWall.Count - 1; k++)
-            {
-                AddEdge(graph, forwardWall[k], forwardWall[k + 1]);
-            }
-
-            // 反向边 (Exit → 内部曲线节点逆序 → Entry)
-            for (int k = forwardWall.Count - 1; k > 0; k--)
-            {
-                AddEdge(graph, forwardWall[k], forwardWall[k - 1]);
+                // depth < 0 说明有多余的 Exit（浮点边缘情况），安全钳位
+                if (depth < 0) depth = 0;
             }
         }
 
@@ -722,6 +756,7 @@ public static class SlicerCore
         public int SegmentIndex;     // 多边形边索引
         public float LocalTOnEdge;   // 在多边形边上的进度
         public int PathId;           // 所属路径 ID
+        public bool IsEntry;         // 是否为进入实体的交叉点（由 cross(edgeDir, cutDir) 判定）
     }
 
     // =================================================================================
