@@ -11,27 +11,26 @@ using Unity.Burst;
 /// 优化策略：
 /// 1. 绕序规范化：强制外圈 CCW，孔洞 CW。
 /// 2. 静态树加速：使用 NativeAABBTree 将几何查询从 O(N) 降至 O(log N)。
-/// 3. 双向链表：将缝合操作从 O(N) 内存搬运降至 O(1) 指针操作。
+/// 3. NativeArray内存展平：将原本频繁装箱 GC 的双向链表，压平成数组内连续寻址的零开销模式。
 /// </para>
 /// </summary>
 public class PolygonHoleMerger
 {
-    // 双向链表节点，用于 O(1) 插入
-    private class ListNode
+    // 双向链表节点 (NativeArray扁平版)，用于 O(1) 插入与查询
+    private struct NativeListNode
     {
         public Vector2 Position;
-        public ListNode Next;
-        public ListNode Prev;
-        public ListNode(Vector2 p) { Position = p; }
+        public int Next;
+        public int Prev;
     }
 
     // 孔洞元数据
     private struct HoleData
     {
-        public ListNode Head;
+        public int Head;
         public int Count;
         public float MaxX;      // 关键：用于从最右侧开始合并
-        public ListNode MaxXNode;
+        public int MaxXNode;
     }
 
     // 动态生成的"桥"记录
@@ -48,44 +47,56 @@ public class PolygonHoleMerger
     {
         if (holes == null || holes.Count == 0) return new List<Vector2>(outRing);
 
-        // 0. 规范化绕序 (Winding Order Normalization)
-        // 图形学铁律：外实内虚 -> 外圈逆时针(CCW), 孔洞顺时针(CW)
+        // 0. 规范化绕序
         EnsureWinding(outRing, true);
         for (int i = 0; i < holes.Count; i++) EnsureWinding(holes[i], false);
 
-        // 1. 构建 AABB 树 (包含所有原始边，作为静态阻挡层)
         NativeAABBTree staticWallTree = new NativeAABBTree();
         staticWallTree.Build(outRing, holes);
+
+        int totalNodes = outRing.Count;
+        for (int i = 0; i < holes.Count; i++) totalNodes += holes[i].Count;
+        int maxNodes = totalNodes + holes.Count * 2;
+        
+        NativeArray<NativeListNode> nodes = new NativeArray<NativeListNode>(maxNodes, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
+        int nextFreeIndex = totalNodes;
 
         try
         {
             // 2. 链表化外圈
-            ListNode outerHead = CreateLoop(outRing);
+            int outerHead = CreateLoop(outRing, ref nodes, 0);
 
             // 3. 预处理孔洞
             List<HoleData> holeDatas = new List<HoleData>(holes.Count);
+            int currentOffset = outRing.Count;
             for (int i = 0; i < holes.Count; i++)
             {
                 var holePoints = holes[i];
                 if (holePoints.Count < 3) continue;
 
-                ListNode head = CreateLoop(holePoints);
+                int head = CreateLoop(holePoints, ref nodes, currentOffset);
+                currentOffset += holePoints.Count;
 
                 // 寻找 X 坐标最大的点 (MaxX)
-                // 策略：往最右边搭桥，通常被阻挡的概率最小
-                ListNode curr = head;
-                ListNode maxNode = head;
+                int curr = head;
+                int maxNode = head;
                 float maxX = -float.MaxValue;
                 int count = 0;
+                
+                int watchdog = 0;
+                int watchdogLimit = maxNodes * 2;
+
                 do
                 {
-                    if (curr.Position.x > maxX)
+                    if (nodes[curr].Position.x > maxX)
                     {
-                        maxX = curr.Position.x;
+                        maxX = nodes[curr].Position.x;
                         maxNode = curr;
                     }
-                    curr = curr.Next;
+                    curr = nodes[curr].Next;
                     count++;
+                    watchdog++;
+                    if (watchdog > watchdogLimit) { Debug.LogError("[PolygonHoleMerger] Init Watchdog Timeout."); break; }
                 } while (curr != head);
 
                 holeDatas.Add(new HoleData { Head = head, Count = count, MaxX = maxX, MaxXNode = maxNode });
@@ -99,19 +110,19 @@ public class PolygonHoleMerger
             // 5. 逐个合并
             foreach (var hole in holeDatas)
             {
-                Vector2 M = hole.MaxXNode.Position;
+                Vector2 M = nodes[hole.MaxXNode].Position;
 
                 // 寻找最佳连接点 P (O(N_outer * log N_total))
-                ListNode bestP = FindBestBridgePoint(M, outerHead, staticWallTree, dynamicBridges);
+                int bestP = FindBestBridgePoint(M, outerHead, ref nodes, staticWallTree, dynamicBridges, maxNodes);
 
-                if (bestP != null)
+                if (bestP != -1)
                 {
-                    Vector2 P = bestP.Position;
+                    Vector2 P = nodes[bestP].Position;
                     // 记录新桥，防止后续的洞穿过这条线
                     dynamicBridges.Add(new BridgeSegment { A = M, B = P });
 
                     // 执行指针缝合 (Surgery)
-                    StitchLists(bestP, hole.MaxXNode);
+                    StitchLists(bestP, hole.MaxXNode, ref nodes, ref nextFreeIndex);
                 }
                 else
                 {
@@ -120,153 +131,130 @@ public class PolygonHoleMerger
             }
 
             // 6. 还原为 List (O(N))
-            return FlattenList(outerHead);
+            return FlattenList(outerHead, ref nodes, maxNodes);
         }
         finally
         {
+            if (nodes.IsCreated) nodes.Dispose();
             staticWallTree.Dispose();
         }
     }
 
-    /// <summary>
-    /// 寻找最佳搭桥点 P
-    /// </summary>
-    private static ListNode FindBestBridgePoint(
+    private static int FindBestBridgePoint(
         Vector2 M,
-        ListNode outerLoop,
+        int outerLoop,
+        ref NativeArray<NativeListNode> nodes,
         NativeAABBTree tree,
-        List<BridgeSegment> bridges)
+        List<BridgeSegment> bridges,
+        int limitNodesCount)
     {
-        // 1. 统计外圈候选项数量
-        int pointCount = 0;
-        ListNode curr = outerLoop;
-        do
-        {
-            pointCount++;
-            curr = curr.Next;
-        } while (curr != outerLoop);
-
-        // 2. 如果候选点极少，采用传统单核循环，避免调度税
-        if (pointCount <= 128)
-        {
-            return FindBestBridgePointSequential(M, outerLoop, tree, bridges);
-        }
-
-        // 3. 触发 Job-System (超过 128 个候选项的大型并发查路)
-        // UnityEngine.Debug.Log($"[PolygonHoleMerger] 触发超级寻桥 Job！测试点数: {pointCount}");
-
-        NativeArray<Vector2> candidates = new NativeArray<Vector2>(pointCount, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-        NativeArray<float> distances = new NativeArray<float>(pointCount, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-        NativeArray<BridgeSegment> dynamicBridges = new NativeArray<BridgeSegment>(bridges.Count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-
+        NativeList<Vector2> candidates = new NativeList<Vector2>(limitNodesCount, Allocator.TempJob);
+        NativeList<int> candidateIndices = new NativeList<int>(limitNodesCount, Allocator.TempJob);
+        
         try
         {
-            curr = outerLoop;
-            for (int i = 0; i < pointCount; i++)
+            int curr = outerLoop;
+            int watchdog = 0;
+            do
             {
-                candidates[i] = curr.Position;
-                curr = curr.Next;
+                if (curr < 0 || curr >= nodes.Length) { Debug.LogError("[PolygonHoleMerger] OOB inside FindBestBridgePoint."); break; }
+                candidates.Add(nodes[curr].Position);
+                candidateIndices.Add(curr);
+                curr = nodes[curr].Next;
+                watchdog++;
+                if (watchdog > limitNodesCount * 2) { Debug.LogError("[PolygonHoleMerger] Watchdog Timeout FindBestBridgePoint."); break; }
+            } while (curr != outerLoop);
+
+            int pointCount = candidates.Length;
+
+            if (pointCount <= 128)
+            {
+                return FindBestBridgePointSequential(M, candidates, candidateIndices, tree, bridges);
             }
 
-            for (int i = 0; i < bridges.Count; i++)
+            NativeArray<float> distances = new NativeArray<float>(pointCount, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            NativeArray<BridgeSegment> dynamicBridges = new NativeArray<BridgeSegment>(bridges.Count, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+
+            try
             {
-                dynamicBridges[i] = bridges[i];
-            }
+                for (int i = 0; i < bridges.Count; i++) dynamicBridges[i] = bridges[i];
 
-            BridgeScanJob job = new BridgeScanJob
-            {
-                M = M,
-                Points = candidates,
-                Tree = tree,
-                Bridges = dynamicBridges,
-                OutputDistances = distances
-            };
-
-            // 分发任务：每批 32 个点为一条执行线程
-            job.Schedule(pointCount, 32).Complete();
-
-            // 搜寻最优解
-            float minDist = float.MaxValue;
-            int bestIndex = -1;
-
-            for (int i = 0; i < pointCount; i++)
-            {
-                if (distances[i] < minDist)
+                BridgeScanJob job = new BridgeScanJob
                 {
-                    minDist = distances[i];
-                    bestIndex = i;
+                    M = M,
+                    Points = candidates.AsArray(),
+                    Tree = tree,
+                    Bridges = dynamicBridges,
+                    OutputDistances = distances
+                };
+
+                job.Schedule(pointCount, 32).Complete();
+
+                float minDist = float.MaxValue;
+                int bestIndex = -1;
+
+                for (int i = 0; i < pointCount; i++)
+                {
+                    if (distances[i] < minDist)
+                    {
+                        minDist = distances[i];
+                        bestIndex = i;
+                    }
                 }
+
+                if (bestIndex == -1) return -1;
+                return candidateIndices[bestIndex];
             }
-
-            if (bestIndex == -1) return null;
-
-            // 映射回链表节点
-            ListNode bestNode = outerLoop;
-            for (int i = 0; i < bestIndex; i++)
+            finally
             {
-                bestNode = bestNode.Next;
+                distances.Dispose();
+                dynamicBridges.Dispose();
             }
-            return bestNode;
         }
         finally
         {
             candidates.Dispose();
-            distances.Dispose();
-            dynamicBridges.Dispose();
+            candidateIndices.Dispose();
         }
     }
 
-    private static ListNode FindBestBridgePointSequential(
+    private static int FindBestBridgePointSequential(
         Vector2 M,
-        ListNode outerLoop,
+        NativeList<Vector2> candidates,
+        NativeList<int> candidateIndices,
         NativeAABBTree tree,
         List<BridgeSegment> bridges)
     {
-        ListNode bestNode = null;
+        int bestNode = -1;
         float minDistSq = float.MaxValue;
 
-        ListNode curr = outerLoop;
-        do
+        for (int i = 0; i < candidates.Length; i++)
         {
-            Vector2 P = curr.Position;
+            Vector2 P = candidates[i];
             float distSq = (P - M).sqrMagnitude;
 
-            // 1. 几何方向剪枝 
-            if (P.x <= M.x)
-            {
-                distSq += 1000000f;
-            }
+            if (P.x <= M.x) distSq += 1000000f;
 
-            // 2. 距离剪枝
             if (distSq < minDistSq)
             {
-                // 3. 可见性验证
                 if (IsBridgeValid(M, P, tree, bridges))
                 {
                     minDistSq = distSq;
-                    bestNode = curr;
+                    bestNode = candidateIndices[i];
                 }
             }
-            curr = curr.Next;
-        } while (curr != outerLoop);
-
+        }
         return bestNode;
     }
 
-    /// <summary>
-    /// 验证桥是否合法 (不撞墙、不撞其他桥)
-    /// </summary>
     private static bool IsBridgeValid(Vector2 start, Vector2 end, NativeAABBTree tree, List<BridgeSegment> bridges)
     {
-        // 1. 检查静态几何体 (O(log N))
         if (tree.Intersects(start, end)) return false;
 
-        // 2. 检查动态生成的桥 (O(H) - 极小常数)
         int bridgeCount = bridges.Count;
         for (int i = 0; i < bridgeCount; i++)
         {
             BridgeSegment b = bridges[i];
-            // 排除共享顶点引发拓扑绞杀：严格禁止多桥叠加于同一点，违者零容忍直接返还 false 断路。
             if (IsSamePoint(start, b.A) || IsSamePoint(start, b.B) ||
                 IsSamePoint(end, b.A) || IsSamePoint(end, b.B)) return false;
 
@@ -275,49 +263,46 @@ public class PolygonHoleMerger
         return true;
     }
 
-    /// <summary>
-    /// 核心缝合逻辑：将孔洞链表接入外圈链表
-    /// </summary>
-    /// <param name="nodeP">外圈上的连接点 P</param>
-    /// <param name="nodeM">孔洞上的起始点 M</param>
-    private static void StitchLists(ListNode nodeP, ListNode nodeM)
+    private static void StitchLists(int nodeP, int nodeM, ref NativeArray<NativeListNode> nodes, ref int nextFreeIndex)
     {
-        // 目标拓扑： ... -> P -> M -> (Hole Loop) -> M' -> P' -> P_Next ...
-        // P -> M 是进洞，M' -> P' 是出洞
+        int pNext = nodes[nodeP].Next;
+        int mPrev = nodes[nodeM].Prev;
 
-        // 1. 缓存关键连接点
-        ListNode pNext = nodeP.Next;
-        ListNode mPrev = nodeM.Prev; // 孔洞的逻辑尾部
+        int copyM = nextFreeIndex++;
+        int copyP = nextFreeIndex++;
 
-        // 2. 创建回程节点副本 (模拟几何重合但拓扑不同的边)
-        ListNode copyM = new ListNode(nodeM.Position); // M'
-        ListNode copyP = new ListNode(nodeP.Position); // P'
+        NativeListNode mPrime = new NativeListNode { Position = nodes[nodeM].Position };
+        NativeListNode pPrime = new NativeListNode { Position = nodes[nodeP].Position };
 
-        // 3. 指针重连
+        {
+            var pNode = nodes[nodeP]; pNode.Next = nodeM; nodes[nodeP] = pNode;
+            var mNode = nodes[nodeM]; mNode.Prev = nodeP; nodes[nodeM] = mNode;
+        }
 
-        // Step A: 外圈 P -> 孔洞 M
-        nodeP.Next = nodeM;
-        nodeM.Prev = nodeP;
+        {
+            var mPrevNode = nodes[mPrev]; mPrevNode.Next = copyM; nodes[mPrev] = mPrevNode;
+            mPrime.Prev = mPrev;
+        }
 
-        // Step B: 孔洞尾 Z -> M' (将闭环断开并指向副本)
-        mPrev.Next = copyM;
-        copyM.Prev = mPrev;
+        {
+            mPrime.Next = copyP;
+            pPrime.Prev = copyM;
+        }
 
-        // Step C: M' -> P' (出洞桥)
-        copyM.Next = copyP;
-        copyP.Prev = copyM;
+        {
+            pPrime.Next = pNext;
+            nodes[copyM] = mPrime;
+            nodes[copyP] = pPrime;
 
-        // Step D: P' -> 外圈 P_Next (回归主路)
-        copyP.Next = pNext;
-        pNext.Prev = copyP;
+            var pNextNode = nodes[pNext]; pNextNode.Prev = copyP; nodes[pNext] = pNextNode;
+        }
     }
 
-    // 强制修正绕序 (面积法)
     private static void EnsureWinding(List<Vector2> points, bool targetCCW)
     {
         if (points == null || points.Count < 3) return;
 
-        double area = 0; // double 防止累加溢出
+        double area = 0; 
         for (int i = 0; i < points.Count; i++)
         {
             Vector2 p1 = points[i];
@@ -325,46 +310,46 @@ public class PolygonHoleMerger
             area += (p2.x - p1.x) * (p2.y + p1.y);
         }
 
-        // 梯形公式：Area < 0 为 CCW
         bool isCCW = area < 0;
-        if (isCCW != targetCCW)
-        {
-            points.Reverse();
-        }
+        if (isCCW != targetCCW) points.Reverse();
     }
 
-    private static ListNode CreateLoop(List<Vector2> points)
+    private static int CreateLoop(List<Vector2> points, ref NativeArray<NativeListNode> nodes, int startOffset)
     {
-        if (points.Count == 0) return null;
-        ListNode head = new ListNode(points[0]);
-        ListNode curr = head;
-        for (int i = 1; i < points.Count; i++)
+        if (points.Count == 0) return -1;
+        int count = points.Count;
+        for (int i = 0; i < count; i++)
         {
-            ListNode n = new ListNode(points[i]);
-            curr.Next = n;
-            n.Prev = curr;
-            curr = n;
+            NativeListNode n = new NativeListNode();
+            n.Position = points[i];
+            n.Prev = startOffset + (i - 1 + count) % count;
+            n.Next = startOffset + (i + 1) % count;
+            nodes[startOffset + i] = n;
         }
-        curr.Next = head;
-        head.Prev = curr;
-        return head;
+        return startOffset;
     }
 
-    private static List<Vector2> FlattenList(ListNode head)
+    private static List<Vector2> FlattenList(int head, ref NativeArray<NativeListNode> nodes, int limitNodesCount)
     {
         List<Vector2> result = new List<Vector2>();
-        if (head == null) return result;
+        if (head == -1) return result;
 
-        ListNode curr = head;
-        int safety = 0;
+        int curr = head;
+        int watchdog = 0;
+        int watchdogLimit = limitNodesCount * 2;
         do
         {
-            result.Add(curr.Position);
-            curr = curr.Next;
-            safety++;
-            if (safety > 100000) // 死循环保护
+            if (curr < 0 || curr >= nodes.Length)
             {
-                Debug.LogError("[PolygonHoleMerger] FlattenList 检测到无限循环，强制中断。");
+                Debug.LogError($"[PolygonHoleMerger] FlattenList OOB limits! Cursor={curr}");
+                break;
+            }
+            result.Add(nodes[curr].Position);
+            curr = nodes[curr].Next;
+            watchdog++;
+            if (watchdog > watchdogLimit) 
+            {
+                Debug.LogError("[PolygonHoleMerger] FlattenList 遇到极限大环 WatchDog 死循环保护触发，强制跳出！");
                 break;
             }
         } while (curr != head);
@@ -403,19 +388,14 @@ public class PolygonHoleMerger
             Vector2 P = Points[index];
             float distSq = (P - M).sqrMagnitude;
 
-            if (P.x <= M.x)
-            {
-                distSq += 1000000f; // Soft fallback penalty
-            }
+            if (P.x <= M.x) distSq += 1000000f; 
 
-            // 检查静态树拦截
             if (Tree.Intersects(M, P))
             {
                 OutputDistances[index] = float.MaxValue;
                 return;
             }
 
-            // 检查动态生成的桥拦截
             for (int i = 0; i < Bridges.Length; i++)
             {
                 BridgeSegment b = Bridges[i];

@@ -34,8 +34,12 @@ public static partial class CurveSlicerCore
         if (cutSegCount < 1) return null;
 
         // --- Phase 1: 多段线 vs 多边形边界的全量碰撞 (使用 AABB 树预过滤) ---
-        List<CurveIntersectionInfo> allHits = new List<CurveIntersectionInfo>(64);
+        NativeList<CurveIntersectionInfo> allHits = new NativeList<CurveIntersectionInfo>(Mathf.Max(64, cutSegCount * 2), Allocator.Temp);
+        NativeList<CurvePair> candidatePairs = new NativeList<CurvePair>(Mathf.Max(64, cutSegCount * 2), Allocator.Temp);
+        NativeList<CurveIntersectionInfo> pathHits = new NativeList<CurveIntersectionInfo>(64, Allocator.Temp);
         
+        try
+        {
         NativeAABBTree envTree = new NativeAABBTree();
         List<List<Vector2>> holes = null;
         if (originalPaths.Count > 1) 
@@ -45,7 +49,6 @@ public static partial class CurveSlicerCore
         }
         envTree.Build(originalPaths[0], holes);
 
-        List<CurvePair> candidatePairs = new List<CurvePair>(64);
         List<NativeAABBTree.Segment> aabbResults = new List<NativeAABBTree.Segment>(16);
 
         float padding = 0.005f;
@@ -77,7 +80,7 @@ public static partial class CurveSlicerCore
         
         envTree.Dispose();
 
-        int totalPairs = candidatePairs.Count;
+        int totalPairs = candidatePairs.Length;
         bool useCurveJob = totalPairs > 64;
         NativeArray<CurvePair> jobPairs = default;
         NativeArray<CurveHitResult> jobResults = default;
@@ -105,7 +108,7 @@ public static partial class CurveSlicerCore
                 var path = originalPaths[pId];
                 int pCount = path.Count;
 
-                List<CurveIntersectionInfo> pathHits = new List<CurveIntersectionInfo>(32);
+                pathHits.Clear();
 
                 if (useCurveJob)
                 {
@@ -159,7 +162,7 @@ public static partial class CurveSlicerCore
                 }
 
                 // 按照 SegmentIndex 排序（主键），同 SegmentIndex 下按 LocalTOnEdge 排序（副键）
-                pathHits.Sort(pathHitsComparer);
+                pathHits.AsArray().Sort(pathHitsComparer);
 
                 // 重建多边形路径（插入交点）
                 SlicerCore.context.TempNewPath.Clear();
@@ -174,7 +177,7 @@ public static partial class CurveSlicerCore
                         newPathVertices.Add(currentVert);
                     }
 
-                    while (hitIdx < pathHits.Count && pathHits[hitIdx].SegmentIndex == i)
+                    while (hitIdx < pathHits.Length && pathHits[hitIdx].SegmentIndex == i)
                     {
                         Vector2 p = pathHits[hitIdx].Point;
                         if (SlicerCore.SqrDist(newPathVertices[newPathVertices.Count - 1], p) <= 0.0001f)
@@ -212,7 +215,7 @@ public static partial class CurveSlicerCore
                 }
             } // end per-path loop
 
-        } // end try
+        } // end inner try
         finally
         {
             if (jobPairs.IsCreated) jobPairs.Dispose();
@@ -222,14 +225,14 @@ public static partial class CurveSlicerCore
         // --- Phase 2: 按全局 T 排序，使用 Entry/Exit 智能配对缝合曲线内壁 ---
         if (cutIntersections.Count < 2) return null;
 
-        // 按全局 T 排序 allHits（零 GC IComparer）
-        allHits.Sort(new CurveGlobalTComparer());
+        // 按全局 T 排序 allHits（零 GC Native 排列）
+        allHits.AsArray().Sort(new CurveGlobalTComparer());
 
         // 深度追踪配对：depth=0 表示在空气中，depth>0 表示在实体中
         int depth = 0;
         int entryHitIdx = -1;
 
-        for (int i = 0; i < allHits.Count; i++)
+        for (int i = 0; i < allHits.Length; i++)
         {
             if (allHits[i].IsEntry)
             {
@@ -348,6 +351,14 @@ public static partial class CurveSlicerCore
         }
 
         tree.Dispose();
+        
         return solids;
+        } // end outer try
+        finally
+        {
+            if (allHits.IsCreated) allHits.Dispose();
+            if (candidatePairs.IsCreated) candidatePairs.Dispose();
+            if (pathHits.IsCreated) pathHits.Dispose();
+        }
     }
 }
