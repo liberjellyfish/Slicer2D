@@ -25,10 +25,10 @@ public static partial class CurveSlicerCore
     /// </summary>
     public static List<SlicerCore.PolygonData> CalculateCurve(List<List<Vector2>> originalPaths, List<Vector2> cutPath)
     {
-        SlicerCore.context.ClearAll();
+        var sys = SlicerSystem.Instance;
+        sys.ClearAll();
 
-        var graph = SlicerCore.context.Graph;
-        var cutIntersections = SlicerCore.context.CutIntersections;
+        var cutIntersections = sys.CutIntersections;
 
         int cutSegCount = cutPath.Count - 1;
         if (cutSegCount < 1) return null;
@@ -165,8 +165,8 @@ public static partial class CurveSlicerCore
                 pathHits.AsArray().Sort(pathHitsComparer);
 
                 // 重建多边形路径（插入交点）
-                SlicerCore.context.TempNewPath.Clear();
-                var newPathVertices = SlicerCore.context.TempNewPath;
+                sys.TempNewPath.Clear();
+                var newPathVertices = sys.TempNewPath;
 
                 int hitIdx = 0;
                 for (int i = 0; i < pCount; i++)
@@ -208,10 +208,15 @@ public static partial class CurveSlicerCore
                 if (newPathVertices.Count > 1 && SlicerCore.SqrDist(newPathVertices[0], newPathVertices[newPathVertices.Count - 1]) < 0.0001f)
                     newPathVertices.RemoveAt(newPathVertices.Count - 1);
 
-                // 将重建后的多边形路径加入图
+                // 将重建后的多边形路径加入图汇聚流 RawEdges
                 for (int i = 0; i < newPathVertices.Count; i++)
                 {
-                    SlicerCore.AddEdge(graph, newPathVertices[i], newPathVertices[(i + 1) % newPathVertices.Count]);
+                    Vector2 u = newPathVertices[i];
+                    Vector2 v = newPathVertices[(i + 1) % newPathVertices.Count];
+                    if (SlicerCore.SqrDist(u, v) > 0.0001f) {
+                        sys.RawEdges.Add(u);
+                        sys.RawEdges.Add(v);
+                    }
                 }
             } // end per-path loop
 
@@ -274,13 +279,15 @@ public static partial class CurveSlicerCore
                             // 正向边
                             for (int k = 0; k < forwardWall.Count - 1; k++)
                             {
-                                SlicerCore.AddEdge(graph, forwardWall[k], forwardWall[k + 1]);
+                                sys.RawEdges.Add(forwardWall[k]);
+                                sys.RawEdges.Add(forwardWall[k + 1]);
                             }
 
                             // 反向边 (Exit → 内部曲线节点逆序 → Entry)
                             for (int k = forwardWall.Count - 1; k > 0; k--)
                             {
-                                SlicerCore.AddEdge(graph, forwardWall[k], forwardWall[k - 1]);
+                                sys.RawEdges.Add(forwardWall[k]);
+                                sys.RawEdges.Add(forwardWall[k - 1]);
                             }
                         }
                         entryHitIdx = -1;
@@ -291,38 +298,8 @@ public static partial class CurveSlicerCore
             }
         }
 
-        // --- Phase 3: 提取回路 (复用现有图论引擎) ---
-        SlicerCore.ExtractLoops(graph);
-
-        List<SlicerCore.PolygonData> solids = new List<SlicerCore.PolygonData>();
-        List<List<Vector2>> holesForTree = new List<List<Vector2>>();
-
-        foreach (var rawLoop in SlicerCore.context.TempRawLoops)
-        {
-            List<Vector2> loop = SlicerCore.SimplifyPath(rawLoop);
-            SlicerCore.context.ReturnList(rawLoop);
-
-            float area = SlicerCore.SignedArea(loop);
-            if (Mathf.Abs(area) < 0.01f)
-            {
-                SlicerCore.context.ReturnList(loop);
-                continue;
-            }
-
-            if (area > 0)
-            {
-                SlicerCore.PolygonData poly = SlicerCore.context.GetPoly();
-                poly.OuterLoop = loop;
-                poly.Area = area;
-                poly.Bounds = SlicerCore.CalculateBounds(loop);
-                solids.Add(poly);
-            }
-            else
-            {
-                holesForTree.Add(loop);
-            }
-        }
-        SlicerCore.context.TempRawLoops.Clear();
+        // --- Phase 3: 提取回路 (交由 SlicerSystem 原生层) ---
+        SlicerCore.RunNativeGraphPipeline(out List<SlicerCore.PolygonData> solids, out List<List<Vector2>> holesForTree);
 
         // --- Phase 4: 孔洞归属分配 (复用现有 AABB 树) ---
         NativePolyTree tree = new NativePolyTree();
@@ -333,7 +310,7 @@ public static partial class CurveSlicerCore
             List<Vector2> hole = holesForTree[i];
             if (hole.Count < 3)
             {
-                SlicerCore.context.ReturnList(hole);
+                sys.ReturnList(hole);
                 continue;
             }
             Vector2 testPoint = (hole[0] + hole[1]) * 0.5f;
@@ -346,7 +323,7 @@ public static partial class CurveSlicerCore
             }
             else
             {
-                SlicerCore.context.ReturnList(hole);
+                sys.ReturnList(hole);
             }
         }
 
