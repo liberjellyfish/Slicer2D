@@ -62,6 +62,8 @@ public struct NativeAABBTree : IDisposable
     {
         public Vector2 P1, P2;
         public float minX, minY, maxX, maxY;
+        public int PathId;
+        public int EdgeIdx;
     }
 
     // === 核心数据存储 ===
@@ -94,10 +96,10 @@ public struct NativeAABBTree : IDisposable
 
         // 2. 填充线段数组 (此时是乱序的)
         int ptr = 0;
-        AddSegmentsFromLoop(outerLoop, ref ptr);
+        AddSegmentsFromLoop(outerLoop, ref ptr, 0);
         if (holes != null)
         {
-            for (int i = 0; i < holes.Count; i++) AddSegmentsFromLoop(holes[i], ref ptr);
+            for (int i = 0; i < holes.Count; i++) AddSegmentsFromLoop(holes[i], ref ptr, i + 1);
         }
 
         // 3. 递归建树
@@ -109,7 +111,7 @@ public struct NativeAABBTree : IDisposable
     }
 
     // 将环路顶点转换为线段存入数组
-    private void AddSegmentsFromLoop(List<Vector2> loop, ref int ptr)
+    private void AddSegmentsFromLoop(List<Vector2> loop, ref int ptr, int pathId)
     {
         int count = loop.Count;
         if (count < 2) return;
@@ -131,6 +133,8 @@ public struct NativeAABBTree : IDisposable
             s.minY = p1.y < p2.y ? p1.y : p2.y;
             s.maxX = p1.x > p2.x ? p1.x : p2.x;
             s.maxY = p1.y > p2.y ? p1.y : p2.y;
+            s.PathId = pathId;
+            s.EdgeIdx = i;
             
             segments[ptr] = s;
             ptr++;
@@ -262,6 +266,48 @@ public struct NativeAABBTree : IDisposable
         if (IntersectsRecursive(nodes[nodeIdx].rightChildIndex, p1, p2)) return true;
 
         return false;
+    }
+
+    /// <summary>
+    /// 查询给定 AABB 内可能重叠的所有线段 (用于预过滤)
+    /// </summary>
+    public void QueryOverlap(Vector2 p1, Vector2 p2, float padding, List<Segment> results)
+    {
+        if (nodesUsed == 0) return;
+        
+        float sMinX = p1.x < p2.x ? p1.x : p2.x;
+        float sMaxX = p1.x > p2.x ? p1.x : p2.x;
+        float sMinY = p1.y < p2.y ? p1.y : p2.y;
+        float sMaxY = p1.y > p2.y ? p1.y : p2.y;
+
+        sMinX -= padding; sMaxX += padding;
+        sMinY -= padding; sMaxY += padding;
+
+        QueryOverlapRecursive(0, sMinX, sMinY, sMaxX, sMaxY, results);
+    }
+
+    private void QueryOverlapRecursive(int nodeIdx, float sMinX, float sMinY, float sMaxX, float sMaxY, List<Segment> results)
+    {
+        FlatNode node = nodes[nodeIdx];
+        if (sMinX > node.maxX || sMaxX < node.minX || sMinY > node.maxY || sMaxY < node.minY) return;
+
+        if (node.segmentCount > 0)
+        {
+            int start = node.segmentStartIndex;
+            int end = start + node.segmentCount;
+            for (int i = start; i < end; i++)
+            {
+                Segment s = segments[i];
+                if (!(sMinX > s.maxX || sMaxX < s.minX || sMinY > s.maxY || sMaxY < s.minY))
+                {
+                    results.Add(s);
+                }
+            }
+            return;
+        }
+
+        if (node.leftChildIndex != -1) QueryOverlapRecursive(node.leftChildIndex, sMinX, sMinY, sMaxX, sMaxY, results);
+        if (node.rightChildIndex != -1) QueryOverlapRecursive(node.rightChildIndex, sMinX, sMinY, sMaxX, sMaxY, results);
     }
 
     // 增加容差到 1e-7f，处理 float 精度问题

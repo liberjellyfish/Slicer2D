@@ -76,7 +76,7 @@ public static partial class SlicerCore
     }
 
     // 上下文：一次切割操作中复用的所有内存
-    private class SliceContext
+    internal class SliceContext
     {
         public Dictionary<Vector2, List<Vector2>> Graph;
         public List<Vector2> CutIntersections;
@@ -149,7 +149,7 @@ public static partial class SlicerCore
 
     // 静态单例上下文，单线程下安全 (Unity 协程需要在主线程跑，所以通常是安全的)
     // 如果有多线程需求，需改为 [ThreadStatic]
-    private static SliceContext context = new SliceContext();
+    internal static SliceContext context = new SliceContext();
 
     // =================================================================================
     //                                  配置常量 & 结构
@@ -157,7 +157,7 @@ public static partial class SlicerCore
     private const float MIN_VERT_DIST_SQ = 0.0001f; // 0.01 * 0.01
     private const float AREA_THRESHOLD = 0.01f;
 
-    private readonly struct EdgeKey : System.IEquatable<EdgeKey>
+    internal readonly struct EdgeKey : System.IEquatable<EdgeKey>
     {
         private readonly long id; // 将坐标压缩成一个 long
         public EdgeKey(Vector2 u, Vector2 v)
@@ -172,7 +172,7 @@ public static partial class SlicerCore
         public override int GetHashCode() => id.GetHashCode();
     }
 
-    private struct IntersectionInfo
+    internal struct IntersectionInfo
     {
         public Vector2 Point;
         public float T;
@@ -418,353 +418,13 @@ public static partial class SlicerCore
         }
     }
 
-    // =================================================================================
-    //                           曲线切割核心 (Polyline Slice)
-    // =================================================================================
 
-    /// <summary>
-    /// 曲线贯穿切割核心算法。
-    /// cutPath 是经过 RDP 抽稀后的局部空间折线路径（已延长头尾）。
-    /// </summary>
-    public static List<PolygonData> CalculateCurve(List<List<Vector2>> originalPaths, List<Vector2> cutPath)
-    {
-        context.ClearAll();
-
-        var graph = context.Graph;
-        var cutIntersections = context.CutIntersections;
-
-        int cutSegCount = cutPath.Count - 1;
-        if (cutSegCount < 1) return null;
-
-        // --- Phase 1: 多段线 vs 多边形边界的全量碰撞 (Job/Burst 并行化) ---
-        // 全局 T = cutSegmentIndex + localT
-        List<CurveIntersectionInfo> allHits = new List<CurveIntersectionInfo>(64);
-
-        // 预计算总碰撞对数，决定是否启用 Job
-        int totalPairs = 0;
-        for (int pi = 0; pi < originalPaths.Count; pi++)
-            totalPairs += originalPaths[pi].Count * cutSegCount;
-
-        bool useCurveJob = totalPairs > 64;
-        NativeArray<CurvePair> jobPairs = default;
-        NativeArray<CurveHitResult> jobResults = default;
-
-        try
-        {
-        // 填充 Job 输入数据
-        if (useCurveJob)
-        {
-            jobPairs = new NativeArray<CurvePair>(totalPairs, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-            jobResults = new NativeArray<CurveHitResult>(totalPairs, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-
-            int offset = 0;
-            for (int pId = 0; pId < originalPaths.Count; pId++)
-            {
-                var p = originalPaths[pId];
-                int pCount = p.Count;
-                for (int edgeIdx = 0; edgeIdx < pCount; edgeIdx++)
-                {
-                    Vector2 eA = p[edgeIdx];
-                    Vector2 eB = p[(edgeIdx + 1) % pCount];
-                    for (int cutIdx = 0; cutIdx < cutSegCount; cutIdx++)
-                    {
-                        jobPairs[offset++] = new CurvePair
-                        {
-                            EdgeA = eA, EdgeB = eB,
-                            CutA = cutPath[cutIdx], CutB = cutPath[cutIdx + 1],
-                            PathId = pId, EdgeIdx = edgeIdx, CutIdx = cutIdx
-                        };
-                    }
-                }
-            }
-
-            new CurveIntersectionJob { Pairs = jobPairs, Results = jobResults }
-                .Schedule(totalPairs, 64).Complete();
-        }
-
-        // 按路径收集交点结果
-        int jobOffset = 0;
-        CurvePathHitsComparer pathHitsComparer = new CurvePathHitsComparer();
-
-        for (int pId = 0; pId < originalPaths.Count; pId++)
-        {
-            var path = originalPaths[pId];
-            int pCount = path.Count;
-
-            List<CurveIntersectionInfo> pathHits = new List<CurveIntersectionInfo>(32);
-
-            if (useCurveJob)
-            {
-                // 从 Job 结果中收集本路径的命中
-                int pathPairCount = pCount * cutSegCount;
-                for (int i = 0; i < pathPairCount; i++)
-                {
-                    CurveHitResult r = jobResults[jobOffset + i];
-                    if (r.Hit)
-                    {
-                        pathHits.Add(new CurveIntersectionInfo
-                        {
-                            Point = r.Point,
-                            GlobalT = r.GlobalT,
-                            SegmentIndex = r.EdgeIdx,
-                            LocalTOnEdge = r.LocalTOnEdge,
-                            PathId = r.PathId,
-                            IsEntry = r.IsEntry
-                        });
-                    }
-                }
-                jobOffset += pathPairCount;
-            }
-            else
-            {
-                // 小规模回退：主线程串行检测
-                for (int edgeIdx = 0; edgeIdx < pCount; edgeIdx++)
-                {
-                    Vector2 edgeA = path[edgeIdx];
-                    Vector2 edgeB = path[(edgeIdx + 1) % pCount];
-
-                    for (int cutIdx = 0; cutIdx < cutSegCount; cutIdx++)
-                    {
-                        Vector2 cutA = cutPath[cutIdx];
-                        Vector2 cutB = cutPath[cutIdx + 1];
-
-                        if (SlicerMath.SegmentSegmentIntersect(edgeA, edgeB, cutA, cutB,
-                            out Vector2 intersection, out float tEdge, out float tCut))
-                        {
-                            float globalT = cutIdx + tCut;
-                            Vector2 edir = edgeB - edgeA;
-                            Vector2 cdir = cutB - cutA;
-                            float crossVal = edir.x * cdir.y - edir.y * cdir.x;
-                            bool isEntry = crossVal > 0;
-
-                            pathHits.Add(new CurveIntersectionInfo
-                            {
-                                Point = intersection,
-                                GlobalT = globalT,
-                                SegmentIndex = edgeIdx,
-                                LocalTOnEdge = tEdge,
-                                PathId = pId,
-                                IsEntry = isEntry
-                            });
-                        }
-                    }
-                }
-            }
-
-            // 按照 SegmentIndex 排序（主键），同 SegmentIndex 下按 LocalTOnEdge 排序（副键）
-            pathHits.Sort(pathHitsComparer);
-
-            // 重建多边形路径（插入交点）
-            context.TempNewPath.Clear();
-            var newPathVertices = context.TempNewPath;
-
-            int hitIdx = 0;
-            for (int i = 0; i < pCount; i++)
-            {
-                Vector2 currentVert = path[i];
-                if (newPathVertices.Count == 0 || SqrDist(newPathVertices[newPathVertices.Count - 1], currentVert) > MIN_VERT_DIST_SQ)
-                {
-                    newPathVertices.Add(currentVert);
-                }
-
-                while (hitIdx < pathHits.Count && pathHits[hitIdx].SegmentIndex == i)
-                {
-                    Vector2 p = pathHits[hitIdx].Point;
-                    if (SqrDist(newPathVertices[newPathVertices.Count - 1], p) <= MIN_VERT_DIST_SQ)
-                    {
-                        // 极近时用已有顶点代替，但仍记录交点
-                        cutIntersections.Add(newPathVertices[newPathVertices.Count - 1]);
-                        allHits.Add(new CurveIntersectionInfo
-                        {
-                            Point = newPathVertices[newPathVertices.Count - 1],
-                            GlobalT = pathHits[hitIdx].GlobalT,
-                            SegmentIndex = pathHits[hitIdx].SegmentIndex,
-                            LocalTOnEdge = pathHits[hitIdx].LocalTOnEdge,
-                            PathId = pId,
-                            IsEntry = pathHits[hitIdx].IsEntry
-                        });
-                    }
-                    else
-                    {
-                        newPathVertices.Add(p);
-                        cutIntersections.Add(p);
-                        allHits.Add(pathHits[hitIdx]);
-                    }
-                    hitIdx++;
-                }
-            }
-
-            // 闭合检查
-            if (newPathVertices.Count > 1 && SqrDist(newPathVertices[0], newPathVertices[newPathVertices.Count - 1]) < MIN_VERT_DIST_SQ)
-                newPathVertices.RemoveAt(newPathVertices.Count - 1);
-
-            // 将重建后的多边形路径加入图
-            for (int i = 0; i < newPathVertices.Count; i++)
-            {
-                AddEdge(graph, newPathVertices[i], newPathVertices[(i + 1) % newPathVertices.Count]);
-            }
-        } // end per-path loop
-
-        } // end try
-        finally
-        {
-            if (jobPairs.IsCreated) jobPairs.Dispose();
-            if (jobResults.IsCreated) jobResults.Dispose();
-        }
-
-        // --- Phase 2: 按全局 T 排序，使用 Entry/Exit 智能配对缝合曲线内壁 ---
-        if (cutIntersections.Count < 2) return null;
-
-        // 按全局 T 排序 allHits（零 GC IComparer）
-        allHits.Sort(new CurveGlobalTComparer());
-
-        // 深度追踪配对：depth=0 表示在空气中，depth>0 表示在实体中
-        // cross(edgeDir, cutDir) > 0 的交点为 ENTRY（进入实体），< 0 为 EXIT（离开实体）
-        // 当切割线穿越孔洞时，自然产生 EXIT(孔界) → ENTRY(孔界) 的中间过渡，
-        // 深度计数器会正确地在 0 和 1 之间跳转，确保只缝合"在实体内"的曲线段。
-        int depth = 0;
-        int entryHitIdx = -1;
-
-        for (int i = 0; i < allHits.Count; i++)
-        {
-            if (allHits[i].IsEntry)
-            {
-                depth++;
-                if (depth == 1) entryHitIdx = i; // 刚进入实体，记录入口
-            }
-            else
-            {
-                if (depth > 0)
-                {
-                    depth--;
-                    if (depth == 0 && entryHitIdx >= 0)
-                    {
-                        // 配对完成：从 entryHitIdx 到 i 的切割线段在实体内部，需要缝合内壁
-                        Vector2 entry = allHits[entryHitIdx].Point;
-                        Vector2 exit = allHits[i].Point;
-
-                        if (SqrDist(entry, exit) >= MIN_VERT_DIST_SQ)
-                        {
-                            float entryT = allHits[entryHitIdx].GlobalT;
-                            float exitT = allHits[i].GlobalT;
-
-                            int startCutSeg = Mathf.CeilToInt(entryT);
-                            int endCutSeg = Mathf.FloorToInt(exitT);
-
-                            // 正向缝合（Entry → 内部曲线节点 → Exit）
-                            List<Vector2> forwardWall = new List<Vector2>();
-                            forwardWall.Add(entry);
-                            for (int k = startCutSeg; k <= endCutSeg && k < cutPath.Count; k++)
-                            {
-                                if (SqrDist(forwardWall[forwardWall.Count - 1], cutPath[k]) > MIN_VERT_DIST_SQ &&
-                                    SqrDist(cutPath[k], exit) > MIN_VERT_DIST_SQ)
-                                {
-                                    forwardWall.Add(cutPath[k]);
-                                }
-                            }
-                            forwardWall.Add(exit);
-
-                            // 正向边
-                            for (int k = 0; k < forwardWall.Count - 1; k++)
-                            {
-                                AddEdge(graph, forwardWall[k], forwardWall[k + 1]);
-                            }
-
-                            // 反向边 (Exit → 内部曲线节点逆序 → Entry)
-                            for (int k = forwardWall.Count - 1; k > 0; k--)
-                            {
-                                AddEdge(graph, forwardWall[k], forwardWall[k - 1]);
-                            }
-                        }
-                        entryHitIdx = -1;
-                    }
-                }
-                // depth < 0 说明有多余的 Exit（浮点边缘情况），安全钳位
-                if (depth < 0) depth = 0;
-            }
-        }
-
-        // --- Phase 3: 提取回路 (复用现有图论引擎) ---
-        ExtractLoops(graph);
-
-        List<PolygonData> solids = new List<PolygonData>();
-        List<List<Vector2>> holes = new List<List<Vector2>>();
-
-        foreach (var rawLoop in context.TempRawLoops)
-        {
-            List<Vector2> loop = SimplifyPath(rawLoop);
-            context.ReturnList(rawLoop);
-
-            float area = SignedArea(loop);
-            if (Mathf.Abs(area) < AREA_THRESHOLD)
-            {
-                context.ReturnList(loop);
-                continue;
-            }
-
-            if (area > 0)
-            {
-                PolygonData poly = context.GetPoly();
-                poly.OuterLoop = loop;
-                poly.Area = area;
-                poly.Bounds = CalculateBounds(loop);
-                solids.Add(poly);
-            }
-            else
-            {
-                holes.Add(loop);
-            }
-        }
-        context.TempRawLoops.Clear();
-
-        // --- Phase 4: 孔洞归属分配 (复用现有 AABB 树) ---
-        NativePolyTree tree = new NativePolyTree();
-        tree.Build(solids);
-
-        for (int i = 0; i < holes.Count; i++)
-        {
-            List<Vector2> hole = holes[i];
-            if (hole.Count < 3)
-            {
-                context.ReturnList(hole);
-                continue;
-            }
-            Vector2 testPoint = (hole[0] + hole[1]) * 0.5f;
-            float holeAreaAbs = Mathf.Abs(SignedArea(hole));
-
-            PolygonData bestParent = tree.QueryBestParent(testPoint, holeAreaAbs);
-            if (bestParent != null)
-            {
-                bestParent.Holes.Add(hole);
-            }
-            else
-            {
-                context.ReturnList(hole);
-            }
-        }
-
-        tree.Dispose();
-        return solids;
-    }
-
-    /// <summary>
-    /// 曲线切割专用交点信息结构。
-    /// </summary>
-    private struct CurveIntersectionInfo
-    {
-        public Vector2 Point;
-        public float GlobalT;        // 沿曲线的全局排序键
-        public int SegmentIndex;     // 多边形边索引
-        public float LocalTOnEdge;   // 在多边形边上的进度
-        public int PathId;           // 所属路径 ID
-        public bool IsEntry;         // 是否为进入实体的交叉点（由 cross(edgeDir, cutDir) 判定）
-    }
 
     // =================================================================================
     //                                  内部逻辑 (图论 & 几何)
     // =================================================================================
 
-    private static void AddEdge(Dictionary<Vector2, List<Vector2>> graph, Vector2 u, Vector2 v)
+    internal static void AddEdge(Dictionary<Vector2, List<Vector2>> graph, Vector2 u, Vector2 v)
     {
         if (SqrDist(u, v) < 1e-6f) return;
 
@@ -784,7 +444,7 @@ public static partial class SlicerCore
         if (!exists) neighbors.Add(v);
     }
 
-    private static void ExtractLoops(Dictionary<Vector2, List<Vector2>> graph)
+    internal static void ExtractLoops(Dictionary<Vector2, List<Vector2>> graph)
     {
         context.TempRawLoops.Clear();
         context.VisitedEdges.Clear();
@@ -846,7 +506,7 @@ public static partial class SlicerCore
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static float SqrDist(Vector2 a, Vector2 b)
+    internal static float SqrDist(Vector2 a, Vector2 b)
     {
         float dx = a.x - b.x;
         float dy = a.y - b.y;
@@ -854,7 +514,7 @@ public static partial class SlicerCore
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Vector2 GetLeftMostNeighbor(Vector2 prev, Vector2 curr, List<Vector2> neighbors)
+    internal static Vector2 GetLeftMostNeighbor(Vector2 prev, Vector2 curr, List<Vector2> neighbors)
     {
         Vector2 incomingDir = (curr - prev).normalized;
         if (incomingDir == Vector2.zero) incomingDir = Vector2.right;
@@ -915,7 +575,7 @@ public static partial class SlicerCore
         return false;
     }
 
-    private static List<Vector2> SimplifyPath(List<Vector2> path)
+    internal static List<Vector2> SimplifyPath(List<Vector2> path)
     {
         if (path.Count < 3)
         {
@@ -940,7 +600,7 @@ public static partial class SlicerCore
     }
 
     // --- Helper Math ---
-    private static Bounds CalculateBounds(List<Vector2> loop)
+    internal static Bounds CalculateBounds(List<Vector2> loop)
     {
         if (loop.Count == 0) return default;
         float minX = float.MaxValue, minY = float.MaxValue;
@@ -956,7 +616,7 @@ public static partial class SlicerCore
         return new Bounds(new Vector3((minX + maxX) / 2, (minY + maxY) / 2, 0), new Vector3(maxX - minX, maxY - minY, 1));
     }
 
-    private static float SignedArea(List<Vector2> points)
+    internal static float SignedArea(List<Vector2> points)
     {
         float area = 0;
         int count = points.Count;

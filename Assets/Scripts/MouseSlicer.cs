@@ -236,7 +236,7 @@ public class MouseSlicer : MonoBehaviour
             Vector2 centroid = Vector2.zero;
             for (int i = 0; i < worldPath.Count; i++) centroid += new Vector2(worldPath[i].x, worldPath[i].y);
             centroid /= worldPath.Count;
-            
+
             Collider2D[] overlaps = Physics2D.OverlapPointAll(centroid, contactFilter.layerMask);
             foreach (var hit in overlaps)
             {
@@ -260,7 +260,7 @@ public class MouseSlicer : MonoBehaviour
         foreach (GameObject target in processedObjects)
         {
             if (target == null) continue;
-            Slicer.CurveSlice(target, worldPath, isClosed);
+            CurveSlicer.CurveSlice(target, worldPath, isClosed);
         }
     }
 }
