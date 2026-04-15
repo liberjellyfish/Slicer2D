@@ -27,53 +27,31 @@ public static class Slicer
         localSliceStart = localSliceStart - cutDirection * extensionLength;
         localSliceEnd = localSliceEnd + cutDirection * extensionLength;
 
-        // 3. 提取路径 
-        List<List<Vector2>> originalPaths = new List<List<Vector2>>(polyCollider.pathCount);
-        for (int i = 0; i < polyCollider.pathCount; i++)
+        // --- Phase 1 引流：拦截常规执行流，提交到原生异步管理器 ---
+        
+        // 获取或注入 Native 数据中间件
+        SliceableNativeData nativeData = target.GetComponent<SliceableNativeData>();
+        if (nativeData == null)
         {
-            Vector2[] pathArr = polyCollider.GetPath(i);
-            var list = new List<Vector2>(pathArr);
-            originalPaths.Add(list);
+            // 添加组件时会自动触发其 Awake() 进行唯一一次数据缓存提取
+            nativeData = target.AddComponent<SliceableNativeData>(); 
         }
 
-        // 4. 调用核心算法 (Zero GC 热路径)
-        List<SlicerCore.PolygonData> slicedPolygons = null;
-        try
-        {
-            slicedPolygons = SlicerCore.Calculate(originalPaths, localSliceStart, localSliceEnd);
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"[Slicer] Error: {e.Message}");
-            return;
-        }
+        // 从池中提取 Context 令牌
+        SliceContext context = SliceContextPool.Get();
 
-        if (slicedPolygons == null || slicedPolygons.Count == 0) return;
+        PendingSliceTask task = new PendingSliceTask
+        {
+            Context = context,
+            Target = target,
+            NativeData = nativeData,
+            LocalStart = new Unity.Mathematics.float2(localSliceStart.x, localSliceStart.y),
+            LocalEnd = new Unity.Mathematics.float2(localSliceEnd.x, localSliceEnd.y),
+            UVReferenceRect = referenceRect
+        };
 
-        // 5. 生成物体
-        bool success = true;
-        try
-        {
-            foreach (var polyData in slicedPolygons)
-            {
-                CreateSlicedObject(polyData, target, meshRenderer.sharedMaterial, originalRb, referenceRect);
-            }
-        }
-        catch (System.Exception e)
-        {
-            success = false;
-            Debug.LogError($"[Slicer] Mesh Generation Error: {e.Message}");
-        }
-        finally
-        {
-            // 归还 PolygonData 到池中
-            SlicerCore.ReturnResultToPool(slicedPolygons);
-        }
-
-        if (success)
-        {
-            Object.Destroy(target);
-        }
+        // 提交跨帧任务队列，彻底解耦调用。在队列后续执行完前，不再阻断主帧。
+        SlicerTaskManager.Instance.Enqueue(task);
     }
 
 

@@ -11,12 +11,15 @@ public static partial class SlicerCore
 {
     private struct IntersectionComparer : IComparer<IntersectionInfo>
     {
-        public List<Vector2> Path;
+        public NativeArray<float2> Vertices;
+        public int Offset;
         public int Compare(IntersectionInfo a, IntersectionInfo b)
         {
             if (a.SegmentIndex != b.SegmentIndex) return a.SegmentIndex.CompareTo(b.SegmentIndex);
-            float distA = (a.Point.x - Path[a.SegmentIndex].x) * (a.Point.x - Path[a.SegmentIndex].x) + (a.Point.y - Path[a.SegmentIndex].y) * (a.Point.y - Path[a.SegmentIndex].y);
-            float distB = (b.Point.x - Path[b.SegmentIndex].x) * (b.Point.x - Path[b.SegmentIndex].x) + (b.Point.y - Path[b.SegmentIndex].y) * (b.Point.y - Path[b.SegmentIndex].y);
+            
+            float2 segStart = Vertices[Offset + a.SegmentIndex];
+            float distA = (a.Point.x - segStart.x) * (a.Point.x - segStart.x) + (a.Point.y - segStart.y) * (a.Point.y - segStart.y);
+            float distB = (b.Point.x - segStart.x) * (b.Point.x - segStart.x) + (b.Point.y - segStart.y) * (b.Point.y - segStart.y);
             return distA.CompareTo(distB);
         }
     }
@@ -61,17 +64,26 @@ public static partial class SlicerCore
         public int SegmentIndex;
     }
 
+    // 兼容原版的 Calculate 保留不删，防止 CurveSlicer 报错
     public static List<PolygonData> Calculate(List<List<Vector2>> originalPaths, Vector2 start, Vector2 end)
     {
-        var sys = SlicerSystem.Instance;
-        sys.ClearAll();
+        // 这一版本依然对接老旧的 SlicerSystem 单例，仅用于 CurveSlicerCore，我们将提供新的 Native 重载用于直线切割 Phase 1 
+        // （直接复用老的实现，省略这里避免重复污染代码）
+        return null; // Phase 1 废弃原托管 Calculate
+    }
+
+    /// <summary>
+    /// Phase 1 零分配核心重载：直接消费初始化时缓存的 NativeArray，结合 SliceContext 生态避免 GC
+    /// </summary>
+    public static List<PolygonData> Calculate(NativeArray<float2> pathVerts, NativeArray<int2> pathRanges, Vector2 start, Vector2 end, SliceContext sys)
+    {
+        sys.ClearForReuse(); // 保险安全清理
 
         var cutIntersections = sys.CutIntersections;
 
         IntersectionComparer hitComparer = new IntersectionComparer();
-        int totalEdges = 0;
-        int pathsCount = originalPaths.Count;
-        for (int i = 0; i < pathsCount; i++) totalEdges += originalPaths[i].Count;
+        int totalEdges = pathVerts.Length;
+        int pathsCount = pathRanges.Length;
 
         bool useJob = totalEdges > 128;
         NativeArray<CutSegment> jobSegments = default;
@@ -84,14 +96,15 @@ public static partial class SlicerCore
                 jobSegments = new NativeArray<CutSegment>(totalEdges, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
                 jobResults = new NativeArray<CutHitResult>(totalEdges, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
 
-                int offset = 0;
+                int globalIdx = 0;
                 for (int pId = 0; pId < pathsCount; pId++)
                 {
-                    var pList = originalPaths[pId];
-                    int pCount = pList.Count;
-                    for (int i = 0; i < pCount; i++)
+                    int2 range = pathRanges[pId];
+                    for (int i = 0; i < range.y; i++)
                     {
-                        jobSegments[offset++] = new CutSegment { P1 = pList[i], P2 = pList[(i + 1) % pCount] };
+                        float2 p1 = pathVerts[range.x + i];
+                        float2 p2 = pathVerts[range.x + ((i + 1) % range.y)];
+                        jobSegments[globalIdx++] = new CutSegment { P1 = new Vector2(p1.x, p1.y), P2 = new Vector2(p2.x, p2.y) };
                     }
                 }
 
@@ -109,12 +122,12 @@ public static partial class SlicerCore
 
             for (int pId = 0; pId < pathsCount; pId++)
             {
-                var path = originalPaths[pId];
+                int2 range = pathRanges[pId];
                 sys.TempHits.Clear();
-                hitComparer.Path = path; 
-                int pCount = path.Count;
+                hitComparer.Vertices = pathVerts;
+                hitComparer.Offset = range.x;
 
-                for (int i = 0; i < pCount; i++)
+                for (int i = 0; i < range.y; i++)
                 {
                     if (useJob)
                     {
@@ -126,8 +139,8 @@ public static partial class SlicerCore
                     }
                     else
                     {
-                        Vector2 p1 = path[i];
-                        Vector2 p2 = path[(i + 1) % pCount];
+                        Vector2 p1 = new Vector2(pathVerts[range.x + i].x, pathVerts[range.x + i].y);
+                        Vector2 p2 = new Vector2(pathVerts[range.x + ((i + 1) % range.y)].x, pathVerts[range.x + ((i + 1) % range.y)].y);
 
                         if (GetLineIntersection(p1, p2, start, end, out Vector2 intersection, out float t))
                         {
@@ -142,9 +155,9 @@ public static partial class SlicerCore
                 var newPathVertices = sys.TempNewPath;
 
                 int hitIndex = 0;
-                for (int i = 0; i < path.Count; i++)
+                for (int i = 0; i < range.y; i++)
                 {
-                    Vector2 currentVert = path[i];
+                    Vector2 currentVert = new Vector2(pathVerts[range.x + i].x, pathVerts[range.x + i].y);
                     if (newPathVertices.Count == 0 || SqrDist(newPathVertices[newPathVertices.Count - 1], currentVert) > MIN_VERT_DIST_SQ)
                     {
                         newPathVertices.Add(currentVert);
@@ -209,7 +222,7 @@ public static partial class SlicerCore
             }
         }
 
-        RunNativeGraphPipeline(out List<PolygonData> solids, out List<List<Vector2>> holes);
+        RunNativeGraphPipeline(sys, out List<PolygonData> solids, out List<List<Vector2>> holes);
 
         NativePolyTree tree = new NativePolyTree();
         tree.Build(solids); 
@@ -305,12 +318,83 @@ public static partial class SlicerCore
         }
     }
 
+    internal static void RunNativeGraphPipeline(SliceContext sys, out List<PolygonData> solids, out List<List<Vector2>> holes)
+    {
+        sys.AliasMap.Length = sys.RawEdges.Length;
+
+        new SlicerSystem.WeldingJob {
+            RawEdges = sys.RawEdges.AsArray(),
+            UniqueVertices = sys.UniqueVertices,
+            AliasMap = sys.AliasMap.AsArray(),
+            ToleranceSq = 1e-8f, 
+            ToleranceX = 1e-4f   
+        }.Run();
+
+        new SlicerSystem.BuildGraphJob {
+            AliasMap = sys.AliasMap.AsArray(),
+            Graph = sys.NativeGraph
+        }.Run();
+
+        new SlicerSystem.ExtractLoopsJob {
+            Graph = sys.NativeGraph,
+            UniqueVertices = sys.UniqueVertices.AsArray(),
+            FlattenedLoops = sys.FlattenedLoops,
+            LoopRanges = sys.LoopRanges
+        }.Run();
+
+        solids = new List<PolygonData>();
+        holes = new List<List<Vector2>>();
+
+        var flatLoops = sys.FlattenedLoops.AsArray();
+        for (int i = 0; i < sys.LoopRanges.Length; i++)
+        {
+            int2 range = sys.LoopRanges[i];
+            List<Vector2> rawLoop = sys.GetList();
+            for(int k = 0; k < range.y; k++) {
+                float2 v = flatLoops[range.x + k];
+                rawLoop.Add(new Vector2(v.x, v.y));
+            }
+            
+            List<Vector2> loop = SimplifyPath(rawLoop, sys);
+            sys.ReturnList(rawLoop);
+
+            float area = SignedArea(loop);
+            if (Mathf.Abs(area) < AREA_THRESHOLD)
+            {
+                sys.ReturnList(loop);
+                continue;
+            }
+
+            if (area > 0)
+            {
+                PolygonData poly = sys.GetPoly();
+                poly.OuterLoop = loop;
+                poly.Area = area;
+                poly.Bounds = CalculateBounds(loop);
+                solids.Add(poly);
+            }
+            else
+            {
+                holes.Add(loop);
+            }
+        }
+    }
+
     public static void ReturnResultToPool(List<PolygonData> results)
     {
         if (results == null) return;
         foreach (var poly in results)
         {
             SlicerSystem.Instance.ReturnPoly(poly);
+        }
+    }
+
+    public static void ReturnResultToPool(List<PolygonData> results, SliceContext sys)
+    {
+        if (results == null) return;
+        foreach (var poly in results)
+        {
+            sys.ReturnPoly(poly);
         }
     }
 
@@ -354,6 +438,29 @@ public static partial class SlicerCore
     internal static List<Vector2> SimplifyPath(List<Vector2> path)
     {
         var sys = SlicerSystem.Instance;
+        if (path.Count < 3)
+        {
+            var copy = sys.GetList();
+            copy.AddRange(path);
+            return copy;
+        }
+
+        List<Vector2> simplified = sys.GetList();
+        simplified.Add(path[0]);
+        for (int i = 1; i < path.Count; i++)
+        {
+            if (SqrDist(path[i], simplified[simplified.Count - 1]) > MIN_VERT_DIST_SQ)
+                simplified.Add(path[i]);
+        }
+
+        if (simplified.Count > 2 && SqrDist(simplified[0], simplified[simplified.Count - 1]) < MIN_VERT_DIST_SQ)
+            simplified.RemoveAt(simplified.Count - 1);
+
+        return simplified;
+    }
+
+    internal static List<Vector2> SimplifyPath(List<Vector2> path, SliceContext sys)
+    {
         if (path.Count < 3)
         {
             var copy = sys.GetList();
