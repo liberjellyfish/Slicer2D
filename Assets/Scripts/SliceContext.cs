@@ -17,12 +17,9 @@ public class SliceContext : IDisposable
     public NativeList<float2> FlattenedLoops;
     public NativeList<int2> LoopRanges; // start_idx, count
 
-    // ---- Phase 1 过渡用托管结构（Phase 2 将移除转 NativeStream）----
+    // ---- 拓扑重建托管容器 (用于 Phase 3 还原为 Unity Mesh) ----
     public Stack<List<Vector2>> ListPool;
     public Stack<SlicerCore.PolygonData> PolyPool;
-    public List<Vector2> CutIntersections;
-    public List<Vector2> TempNewPath;
-    public List<SlicerCore.IntersectionInfo> TempHits;
 
     // 容量控制阈值
     private const int INITIAL_CAPACITY = 2048;
@@ -44,9 +41,6 @@ public class SliceContext : IDisposable
 
         ListPool = new Stack<List<Vector2>>();
         PolyPool = new Stack<SlicerCore.PolygonData>();
-        CutIntersections = new List<Vector2>(64);
-        TempNewPath = new List<Vector2>(128);
-        TempHits = new List<SlicerCore.IntersectionInfo>(64);
     }
 
     /// <summary>
@@ -68,10 +62,6 @@ public class SliceContext : IDisposable
             NativeGraph.Clear();
             FlattenedLoops.Clear();
             LoopRanges.Clear();
-
-            CutIntersections.Clear();
-            TempNewPath.Clear();
-            TempHits.Clear();
         }
     }
 

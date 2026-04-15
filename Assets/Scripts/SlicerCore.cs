@@ -9,32 +9,6 @@ using System.Diagnostics;
 
 public static partial class SlicerCore
 {
-    private struct IntersectionComparer : IComparer<IntersectionInfo>
-    {
-        public NativeArray<float2> Vertices;
-        public int Offset;
-        public int Compare(IntersectionInfo a, IntersectionInfo b)
-        {
-            if (a.SegmentIndex != b.SegmentIndex) return a.SegmentIndex.CompareTo(b.SegmentIndex);
-            
-            float2 segStart = Vertices[Offset + a.SegmentIndex];
-            float distA = (a.Point.x - segStart.x) * (a.Point.x - segStart.x) + (a.Point.y - segStart.y) * (a.Point.y - segStart.y);
-            float distB = (b.Point.x - segStart.x) * (b.Point.x - segStart.x) + (b.Point.y - segStart.y) * (b.Point.y - segStart.y);
-            return distA.CompareTo(distB);
-        }
-    }
-
-    private struct CutIntersectionComparer : IComparer<Vector2>
-    {
-        public Vector2 Start, End;
-        public int Compare(Vector2 a, Vector2 b)
-        {
-            float distA = (a.x - Start.x) * (End.x - Start.x) + (a.y - Start.y) * (End.y - Start.y);
-            float distB = (b.x - Start.x) * (End.x - Start.x) + (b.y - Start.y) * (End.y - Start.y);
-            return distA.CompareTo(distB);
-        }
-    }
-
     public class PolygonData
     {
         public List<Vector2> OuterLoop;
@@ -72,156 +46,48 @@ public static partial class SlicerCore
         return null; // Phase 1 废弃原托管 Calculate
     }
 
-    /// <summary>
-    /// Phase 1 零分配核心重载：直接消费初始化时缓存的 NativeArray，结合 SliceContext 生态避免 GC
-    /// </summary>
     public static List<PolygonData> Calculate(NativeArray<float2> pathVerts, NativeArray<int2> pathRanges, Vector2 start, Vector2 end, SliceContext sys)
     {
         sys.ClearForReuse(); // 保险安全清理
 
-        var cutIntersections = sys.CutIntersections;
-
-        IntersectionComparer hitComparer = new IntersectionComparer();
-        int totalEdges = pathVerts.Length;
         int pathsCount = pathRanges.Length;
+        if (pathsCount == 0) return null;
 
-        bool useJob = totalEdges > 128;
-        NativeArray<CutSegment> jobSegments = default;
-        NativeArray<CutHitResult> jobResults = default;
+        // Step 1: 建立无锁交叉读写的双平行域 Stream
+        NativeStream edgeStream = new NativeStream(pathsCount, Allocator.TempJob);
+        NativeStream cutHitStream = new NativeStream(pathsCount, Allocator.TempJob);
 
-        try
+        // Step 2: 派发 RebuildPathJob
+        var rebuildJob = new RebuildPathJob
         {
-            if (useJob)
-            {
-                jobSegments = new NativeArray<CutSegment>(totalEdges, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
-                jobResults = new NativeArray<CutHitResult>(totalEdges, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+            PathVerts = pathVerts,
+            PathRanges = pathRanges,
+            SliceStart = new float2(start.x, start.y),
+            SliceEnd = new float2(end.x, end.y),
+            EdgeStreamWriter = edgeStream.AsWriter(),
+            CutHitStreamWriter = cutHitStream.AsWriter()
+        };
+        // 每个切割外环自成一体高度独立，进行 ParallelFor 并发运算
+        var rebuildHandle = rebuildJob.Schedule(pathsCount, 1);
 
-                int globalIdx = 0;
-                for (int pId = 0; pId < pathsCount; pId++)
-                {
-                    int2 range = pathRanges[pId];
-                    for (int i = 0; i < range.y; i++)
-                    {
-                        float2 p1 = pathVerts[range.x + i];
-                        float2 p2 = pathVerts[range.x + ((i + 1) % range.y)];
-                        jobSegments[globalIdx++] = new CutSegment { P1 = new Vector2(p1.x, p1.y), P2 = new Vector2(p2.x, p2.y) };
-                    }
-                }
-
-                var job = new LineIntersectionJob
-                {
-                    Segments = jobSegments,
-                    SliceStart = start,
-                    SliceEnd = end,
-                    Results = jobResults
-                };
-                job.Schedule(totalEdges, 64).Complete();
-            }
-
-            int globalEdgeCounter = 0;
-
-            for (int pId = 0; pId < pathsCount; pId++)
-            {
-                int2 range = pathRanges[pId];
-                sys.TempHits.Clear();
-                hitComparer.Vertices = pathVerts;
-                hitComparer.Offset = range.x;
-
-                for (int i = 0; i < range.y; i++)
-                {
-                    if (useJob)
-                    {
-                        CutHitResult res = jobResults[globalEdgeCounter++];
-                        if (res.Hit)
-                        {
-                            sys.TempHits.Add(new IntersectionInfo { Point = res.Point, T = res.T, SegmentIndex = i });
-                        }
-                    }
-                    else
-                    {
-                        Vector2 p1 = new Vector2(pathVerts[range.x + i].x, pathVerts[range.x + i].y);
-                        Vector2 p2 = new Vector2(pathVerts[range.x + ((i + 1) % range.y)].x, pathVerts[range.x + ((i + 1) % range.y)].y);
-
-                        if (GetLineIntersection(p1, p2, start, end, out Vector2 intersection, out float t))
-                        {
-                            sys.TempHits.Add(new IntersectionInfo { Point = intersection, T = t, SegmentIndex = i });
-                        }
-                    }
-                }
-
-                sys.TempHits.Sort(hitComparer);
-
-                sys.TempNewPath.Clear();
-                var newPathVertices = sys.TempNewPath;
-
-                int hitIndex = 0;
-                for (int i = 0; i < range.y; i++)
-                {
-                    Vector2 currentVert = new Vector2(pathVerts[range.x + i].x, pathVerts[range.x + i].y);
-                    if (newPathVertices.Count == 0 || SqrDist(newPathVertices[newPathVertices.Count - 1], currentVert) > MIN_VERT_DIST_SQ)
-                    {
-                        newPathVertices.Add(currentVert);
-                    }
-
-                    while (hitIndex < sys.TempHits.Count && sys.TempHits[hitIndex].SegmentIndex == i)
-                    {
-                        Vector2 p = sys.TempHits[hitIndex].Point;
-                        if (SqrDist(newPathVertices[newPathVertices.Count - 1], p) <= MIN_VERT_DIST_SQ)
-                        {
-                            cutIntersections.Add(newPathVertices[newPathVertices.Count - 1]);
-                        }
-                        else
-                        {
-                            newPathVertices.Add(p);
-                            cutIntersections.Add(p);
-                        }
-                        hitIndex++;
-                    }
-                }
-                
-                if (newPathVertices.Count > 1 && SqrDist(newPathVertices[0], newPathVertices[newPathVertices.Count - 1]) < MIN_VERT_DIST_SQ)
-                    newPathVertices.RemoveAt(newPathVertices.Count - 1);
-
-                for (int i = 0; i < newPathVertices.Count; i++)
-                {
-                    Vector2 u = newPathVertices[i];
-                    Vector2 v = newPathVertices[(i + 1) % newPathVertices.Count];
-                    if (SqrDist(u, v) > MIN_VERT_DIST_SQ)
-                    {
-                        sys.RawEdges.Add(u);
-                        sys.RawEdges.Add(v);
-                    }
-                }
-            }
-        }
-        finally
+        // Step 3: Stream 归约打平与轴断面缝合 (FlattenAndSewJob)
+        var flattenJob = new FlattenAndSewJob
         {
-            if (useJob)
-            {
-                if (jobSegments.IsCreated) jobSegments.Dispose();
-                if (jobResults.IsCreated) jobResults.Dispose();
-            }
-        }
+            EdgeStreamReader = edgeStream.AsReader(),
+            CutHitStreamReader = cutHitStream.AsReader(),
+            PathCount = pathsCount,
+            SliceStart = new float2(start.x, start.y),
+            SliceEnd = new float2(end.x, end.y),
+            RawEdges = sys.RawEdges // 直接写入池化持有的容器
+        };
+        // 加入 Job 依赖树并立刻强制当前帧主线程 Complete() 回收，实现 100% 内存稳定
+        var flattenHandle = flattenJob.Schedule(rebuildHandle);
+        flattenHandle.Complete();
 
-        if (cutIntersections.Count < 2) return null;
+        edgeStream.Dispose();
+        cutHitStream.Dispose();
 
-        cutIntersections.Sort(new CutIntersectionComparer { Start = start, End = end });
-
-        int validCount = (cutIntersections.Count % 2 == 0) ? cutIntersections.Count : cutIntersections.Count - 1;
-        for (int i = 0; i < validCount; i += 2)
-        {
-            Vector2 pA = cutIntersections[i];
-            Vector2 pB = cutIntersections[i + 1];
-            if (SqrDist(pA, pB) > MIN_VERT_DIST_SQ)
-            {
-                sys.RawEdges.Add(pA);
-                sys.RawEdges.Add(pB);
-                
-                sys.RawEdges.Add(pB);
-                sys.RawEdges.Add(pA);
-            }
-        }
-
+        // 原 RawEdges 检测已废弃，图层后续会过滤无效几何。直接进行最终向后流转。
         RunNativeGraphPipeline(sys, out List<PolygonData> solids, out List<List<Vector2>> holes);
 
         NativePolyTree tree = new NativePolyTree();
