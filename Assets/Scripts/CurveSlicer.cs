@@ -1,5 +1,6 @@
 using UnityEngine;
 using System.Collections.Generic;
+using Unity.Collections;
 
 public static class CurveSlicer
 {
@@ -167,16 +168,33 @@ public static class CurveSlicer
             return;
         }
 
-        // 调用核心曲线布尔运算算法
+        // ==============================================================
+        // Phase 3 调度：激活或提取原生缓冲组件，装卸原生流数组。
+        // ==============================================================
+        SliceableNativeData nativeData = target.GetComponent<SliceableNativeData>();
+        if (nativeData == null) nativeData = target.AddComponent<SliceableNativeData>();
+
+        NativeArray<Unity.Mathematics.float2> nativeCutPath = new NativeArray<Unity.Mathematics.float2>(localCutPath.Count, Allocator.TempJob);
+        for (int i = 0; i < localCutPath.Count; i++) nativeCutPath[i] = new Unity.Mathematics.float2(localCutPath[i].x, localCutPath[i].y);
+
+        SliceContext context = SliceContextPool.Get();
+
+        // 调用原生核芯引擎
         List<SlicerCore.PolygonData> slicedPolygons = null;
         try
         {
-            slicedPolygons = CurveSlicerCore.CalculateCurve(originalPaths, localCutPath);
+            slicedPolygons = CurveSlicerCore.CalculateCurve(nativeData.CachedVertices, nativeData.CachedPathRanges, nativeCutPath, context);
         }
         catch (System.Exception e)
         {
-            Debug.LogError($"[Slicer] CurveSlice Error: {e.Message}\n{e.StackTrace}");
+            Debug.LogError($"[Slicer] Native CurveSlice Error: {e.Message}\n{e.StackTrace}");
             return;
+        }
+        finally
+        {
+            nativeCutPath.Dispose();
+            // 不在此处回收 Context！由于最后同步调用，它需要在返回的 List 使用完毕后才被回收
+            // 但是我们的 Result 现在由 Context 独立返回了，我们在网格生成完毕后归还 Context 即可。
         }
 
         if (slicedPolygons == null || slicedPolygons.Count == 0) return;
@@ -196,7 +214,7 @@ public static class CurveSlicer
         }
         finally
         {
-            SlicerCore.ReturnResultToPool(slicedPolygons);
+            SliceContextPool.Return(context); // 极其重要：在全部执行末尾归还整个 Context 树！
         }
 
         if (success)

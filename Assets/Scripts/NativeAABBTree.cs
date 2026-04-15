@@ -2,6 +2,7 @@ using UnityEngine;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using Unity.Collections;
+using Unity.Mathematics;
 using System;
 
 /// <summary>
@@ -60,7 +61,7 @@ public struct NativeAABBTree : IDisposable
     /// </summary>
     public struct Segment
     {
-        public Vector2 P1, P2;
+        public float2 P1, P2;
         public float minX, minY, maxX, maxY;
         public int PathId;
         public int EdgeIdx;
@@ -125,8 +126,8 @@ public struct NativeAABBTree : IDisposable
 
             // 存入数据
             Segment s = new Segment();
-            s.P1 = p1;
-            s.P2 = p2;
+            s.P1 = new float2(p1.x, p1.y);
+            s.P2 = new float2(p2.x, p2.y);
 
             // 预计算 Min/Max，加速后续的 Partition 过程
             s.minX = p1.x < p2.x ? p1.x : p2.x;
@@ -139,6 +140,39 @@ public struct NativeAABBTree : IDisposable
             segments[ptr] = s;
             ptr++;
         }
+    }
+
+    /// <summary>
+    /// 为给定的连贯拆线构建逆向 AABB 树（专用于 cutPath 构建）
+    /// </summary>
+    public void Build(NativeArray<float2> cutPath)
+    {
+        int totalEdges = cutPath.Length - 1;
+        if (totalEdges < 1) return;
+
+        segments = new NativeArray<Segment>(totalEdges, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        nodes = new NativeArray<FlatNode>(totalEdges * 2, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+
+        for (int i = 0; i < totalEdges; i++)
+        {
+            float2 p1 = cutPath[i];
+            float2 p2 = cutPath[i + 1];
+
+            Segment s = new Segment();
+            s.P1 = p1;
+            s.P2 = p2;
+            s.minX = p1.x < p2.x ? p1.x : p2.x;
+            s.minY = p1.y < p2.y ? p1.y : p2.y;
+            s.maxX = p1.x > p2.x ? p1.x : p2.x;
+            s.maxY = p1.y > p2.y ? p1.y : p2.y;
+            s.PathId = 0;
+            s.EdgeIdx = i; // 纯 CutIdx 索引
+            
+            segments[i] = s;
+        }
+
+        nodesUsed = 0;
+        BuildRecursive(0, totalEdges);
     }
 
     /// <summary>
@@ -253,10 +287,10 @@ public struct NativeAABBTree : IDisposable
                 Segment s = segments[i];
 
                 // 排除共享顶点 (如果连接点本身就在墙上，不算撞墙)
-                if (IsSamePoint(s.P1, p1) || IsSamePoint(s.P1, p2) ||
-                    IsSamePoint(s.P2, p1) || IsSamePoint(s.P2, p2)) continue;
+                if (IsSamePoint(new Vector2(s.P1.x, s.P1.y), p1) || IsSamePoint(new Vector2(s.P1.x, s.P1.y), p2) ||
+                    IsSamePoint(new Vector2(s.P2.x, s.P2.y), p1) || IsSamePoint(new Vector2(s.P2.x, s.P2.y), p2)) continue;
 
-                if (SegmentsIntersect(p1, p2, s.P1, s.P2)) return true;
+                if (SegmentsIntersect(p1, p2, new Vector2(s.P1.x, s.P1.y), new Vector2(s.P2.x, s.P2.y))) return true;
             }
             return false;
         }
@@ -308,6 +342,39 @@ public struct NativeAABBTree : IDisposable
 
         if (node.leftChildIndex != -1) QueryOverlapRecursive(node.leftChildIndex, sMinX, sMinY, sMaxX, sMaxY, results);
         if (node.rightChildIndex != -1) QueryOverlapRecursive(node.rightChildIndex, sMinX, sMinY, sMaxX, sMaxY, results);
+    }
+
+    /// <summary>
+    /// Burst 兼容的空间重叠索引查询，仅返回 CutIdx
+    /// </summary>
+    public void QueryOverlapBurst(float sMinX, float sMinY, float sMaxX, float sMaxY, ref NativeList<int> resultIndices)
+    {
+        if (nodesUsed == 0) return;
+        QueryOverlapBurstRecursive(0, sMinX, sMinY, sMaxX, sMaxY, ref resultIndices);
+    }
+
+    private void QueryOverlapBurstRecursive(int nodeIdx, float sMinX, float sMinY, float sMaxX, float sMaxY, ref NativeList<int> results)
+    {
+        FlatNode node = nodes[nodeIdx];
+        if (sMinX > node.maxX || sMaxX < node.minX || sMinY > node.maxY || sMaxY < node.minY) return;
+
+        if (node.segmentCount > 0)
+        {
+            int start = node.segmentStartIndex;
+            int end = start + node.segmentCount;
+            for (int i = start; i < end; i++)
+            {
+                Segment s = segments[i];
+                if (!(sMinX > s.maxX || sMaxX < s.minX || sMinY > s.maxY || sMaxY < s.minY))
+                {
+                    results.Add(s.EdgeIdx);
+                }
+            }
+            return;
+        }
+
+        if (node.leftChildIndex != -1) QueryOverlapBurstRecursive(node.leftChildIndex, sMinX, sMinY, sMaxX, sMaxY, ref results);
+        if (node.rightChildIndex != -1) QueryOverlapBurstRecursive(node.rightChildIndex, sMinX, sMinY, sMaxX, sMaxY, ref results);
     }
 
     // 增加容差到 1e-7f，处理 float 精度问题
