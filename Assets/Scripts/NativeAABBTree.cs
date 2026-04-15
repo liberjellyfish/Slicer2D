@@ -67,11 +67,12 @@ public struct NativeAABBTree : IDisposable
         public int EdgeIdx;
     }
 
-    // === 核心数据存储 ===
     // 使用 Allocator.Temp 极速分配的多线程安全内存池
     private NativeArray<FlatNode> nodes;
     private NativeArray<Segment> segments; 
     private int nodesUsed;
+
+    public bool IsCreated => nodes.IsCreated;
 
     // 叶子容量阈值：小于此数量不再分裂
     // 4 是经验值，平衡树深度与线性遍历开销

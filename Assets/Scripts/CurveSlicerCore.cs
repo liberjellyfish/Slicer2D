@@ -22,7 +22,7 @@ public static partial class CurveSlicerCore
         NativeAABBTree cutTree = new NativeAABBTree();
         NativeStream edgeStream = default;
         NativeStream cutHitStream = default;
-        
+
         try
         {
             cutTree.Build(cutPath);
@@ -53,48 +53,46 @@ public static partial class CurveSlicerCore
                 RawEdges = sys.RawEdges
             };
             var flattenHandle = flattenJob.Schedule(rebuildHandle);
-            flattenHandle.Complete(); // 回收，完成内存稳定！
+
+            // 沿着原定计划汇聚入图层管线，传递依赖链
+            // 内部会执行 extractHandle.Complete()，强制完成并同步主线程
+            SlicerCore.RunNativeGraphPipeline(sys, flattenHandle, out List<SlicerCore.PolygonData> solids, out List<List<Vector2>> holesForTree);
+
+            // --- Phase 4: 孔洞归属分配 ---
+            NativePolyTree tree = new NativePolyTree();
+            tree.Build(solids);
+
+            for (int i = 0; i < holesForTree.Count; i++)
+            {
+                List<Vector2> hole = holesForTree[i];
+                if (hole.Count < 3)
+                {
+                    sys.ReturnList(hole);
+                    continue;
+                }
+                Vector2 testPoint = (hole[0] + hole[1]) * 0.5f;
+                float holeAreaAbs = Mathf.Abs(SlicerCore.SignedArea(hole));
+
+                SlicerCore.PolygonData bestParent = tree.QueryBestParent(testPoint, holeAreaAbs);
+                if (bestParent != null)
+                {
+                    bestParent.Holes.Add(hole);
+                }
+                else
+                {
+                    sys.ReturnList(hole);
+                }
+            }
+
+            tree.Dispose();
+            return solids;
         }
         finally
         {
-            // 卸载不再需要的数据结构
-            cutTree.Dispose();
+            // 所有操作完成后，不管发生异常还是正常结束，安全回收 TempJob 内存
+            if (cutTree.IsCreated) cutTree.Dispose();
             if (edgeStream.IsCreated) edgeStream.Dispose();
             if (cutHitStream.IsCreated) cutHitStream.Dispose();
         }
-
-        // 沿着原定计划汇聚入图层管线
-        SlicerCore.RunNativeGraphPipeline(sys, out List<SlicerCore.PolygonData> solids, out List<List<Vector2>> holesForTree);
-
-        // --- Phase 4: 孔洞归属分配 (无需修改，原样复用) ---
-        NativePolyTree tree = new NativePolyTree();
-        tree.Build(solids);
-
-        for (int i = 0; i < holesForTree.Count; i++)
-        {
-            List<Vector2> hole = holesForTree[i];
-            if (hole.Count < 3)
-            {
-                sys.ReturnList(hole);
-                continue;
-            }
-            Vector2 testPoint = (hole[0] + hole[1]) * 0.5f;
-            float holeAreaAbs = Mathf.Abs(SlicerCore.SignedArea(hole));
-
-            SlicerCore.PolygonData bestParent = tree.QueryBestParent(testPoint, holeAreaAbs);
-            if (bestParent != null)
-            {
-                bestParent.Holes.Add(hole);
-            }
-            else
-            {
-                sys.ReturnList(hole);
-            }
-        }
-
-        tree.Dispose();
-
-        return solids;
-
     }
 }

@@ -80,15 +80,15 @@ public static partial class SlicerCore
             SliceEnd = new float2(end.x, end.y),
             RawEdges = sys.RawEdges // 直接写入池化持有的容器
         };
-        // 加入 Job 依赖树并立刻强制当前帧主线程 Complete() 回收，实现 100% 内存稳定
+        // 流水线句柄直接向后传递，取消此处的阻塞 Complete
         var flattenHandle = flattenJob.Schedule(rebuildHandle);
-        flattenHandle.Complete();
-
-        edgeStream.Dispose();
-        cutHitStream.Dispose();
 
         // 原 RawEdges 检测已废弃，图层后续会过滤无效几何。直接进行最终向后流转。
-        RunNativeGraphPipeline(sys, out List<PolygonData> solids, out List<List<Vector2>> holes);
+        RunNativeGraphPipeline(sys, flattenHandle, out List<PolygonData> solids, out List<List<Vector2>> holes);
+
+        // RunNativeGraphPipeline 已经内部 Complete 到大决堤，现在可以安全同步释放
+        edgeStream.Dispose();
+        cutHitStream.Dispose();
 
         NativePolyTree tree = new NativePolyTree();
         tree.Build(solids); 
@@ -124,27 +124,28 @@ public static partial class SlicerCore
     internal static void RunNativeGraphPipeline(out List<PolygonData> solids, out List<List<Vector2>> holes)
     {
         var sys = SlicerSystem.Instance;
-        sys.AliasMap.Length = sys.RawEdges.Length;
 
-        new SlicerSystem.WeldingJob {
-            RawEdges = sys.RawEdges.AsArray(),
+        JobHandle weldHandle = new SlicerSystem.WeldingJob {
+            RawEdges = sys.RawEdges,
             UniqueVertices = sys.UniqueVertices,
-            AliasMap = sys.AliasMap.AsArray(),
+            AliasMap = sys.AliasMap,
             ToleranceSq = 1e-8f, 
             ToleranceX = 1e-4f   
-        }.Run();
+        }.Schedule();
 
-        new SlicerSystem.BuildGraphJob {
-            AliasMap = sys.AliasMap.AsArray(),
+        JobHandle graphHandle = new SlicerSystem.BuildGraphJob {
+            AliasMap = sys.AliasMap,
             Graph = sys.NativeGraph
-        }.Run();
+        }.Schedule(weldHandle);
 
-        new SlicerSystem.ExtractLoopsJob {
+        JobHandle extractHandle = new SlicerSystem.ExtractLoopsJob {
             Graph = sys.NativeGraph,
-            UniqueVertices = sys.UniqueVertices.AsArray(),
+            UniqueVertices = sys.UniqueVertices,
             FlattenedLoops = sys.FlattenedLoops,
             LoopRanges = sys.LoopRanges
-        }.Run();
+        }.Schedule(graphHandle);
+
+        extractHandle.Complete();
 
         solids = new List<PolygonData>();
         holes = new List<List<Vector2>>();
@@ -184,29 +185,29 @@ public static partial class SlicerCore
         }
     }
 
-    internal static void RunNativeGraphPipeline(SliceContext sys, out List<PolygonData> solids, out List<List<Vector2>> holes)
+    internal static void RunNativeGraphPipeline(SliceContext sys, JobHandle dependency, out List<PolygonData> solids, out List<List<Vector2>> holes)
     {
-        sys.AliasMap.Length = sys.RawEdges.Length;
-
-        new SlicerSystem.WeldingJob {
-            RawEdges = sys.RawEdges.AsArray(),
+        JobHandle weldHandle = new SlicerSystem.WeldingJob {
+            RawEdges = sys.RawEdges,
             UniqueVertices = sys.UniqueVertices,
-            AliasMap = sys.AliasMap.AsArray(),
+            AliasMap = sys.AliasMap,
             ToleranceSq = 1e-8f, 
             ToleranceX = 1e-4f   
-        }.Run();
+        }.Schedule(dependency);
 
-        new SlicerSystem.BuildGraphJob {
-            AliasMap = sys.AliasMap.AsArray(),
+        JobHandle graphHandle = new SlicerSystem.BuildGraphJob {
+            AliasMap = sys.AliasMap,
             Graph = sys.NativeGraph
-        }.Run();
+        }.Schedule(weldHandle);
 
-        new SlicerSystem.ExtractLoopsJob {
+        JobHandle extractHandle = new SlicerSystem.ExtractLoopsJob {
             Graph = sys.NativeGraph,
-            UniqueVertices = sys.UniqueVertices.AsArray(),
+            UniqueVertices = sys.UniqueVertices,
             FlattenedLoops = sys.FlattenedLoops,
             LoopRanges = sys.LoopRanges
-        }.Run();
+        }.Schedule(graphHandle);
+
+        extractHandle.Complete();
 
         solids = new List<PolygonData>();
         holes = new List<List<Vector2>>();

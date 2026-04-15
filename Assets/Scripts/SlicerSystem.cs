@@ -168,15 +168,16 @@ public class SlicerSystem : IDisposable
     [BurstCompile(CompileSynchronously = true, FloatMode = FloatMode.Fast)]
     public struct WeldingJob : IJob
     {
-        [ReadOnly] public NativeArray<float2> RawEdges;
+        [ReadOnly] public NativeList<float2> RawEdges;
         public NativeList<float2> UniqueVertices;
-        public NativeArray<int> AliasMap;
+        public NativeList<int> AliasMap;
         public float ToleranceSq;
         public float ToleranceX;
 
         public void Execute()
         {
             int N = RawEdges.Length;
+            AliasMap.Length = N;
             if (N == 0) return;
 
             NativeArray<PointWithIndex> sorted = new NativeArray<PointWithIndex>(N, Allocator.Temp);
@@ -221,7 +222,7 @@ public class SlicerSystem : IDisposable
     [BurstCompile(CompileSynchronously = true, FloatMode = FloatMode.Fast)]
     public struct BuildGraphJob : IJob
     {
-        [ReadOnly] public NativeArray<int> AliasMap;
+        [ReadOnly] public NativeList<int> AliasMap;
         public NativeParallelMultiHashMap<int, int> Graph;
 
         public void Execute()
@@ -251,7 +252,7 @@ public class SlicerSystem : IDisposable
     public struct ExtractLoopsJob : IJob
     {
         [ReadOnly] public NativeParallelMultiHashMap<int, int> Graph;
-        [ReadOnly] public NativeArray<float2> UniqueVertices;
+        [ReadOnly] public NativeList<float2> UniqueVertices;
         
         public NativeList<float2> FlattenedLoops;
         public NativeList<int2> LoopRanges;

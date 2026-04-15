@@ -439,29 +439,46 @@ public static partial class SlicerCore
 
             allHits.Sort(new CurveGlobalTComparer());
 
-            // Grazing(边缘极点波掠) 防错纠正法则：正反穿透对自我湮灭
+            // Grazing(边缘极点波掠) 与顶点穿透的极终防错机制：按物理空间进行聚类合并！
+            // 彻底根除因为截面浮点精度导致的幻象交点分离和同一顶点的出入奇偶性翻转（导致原本凹口生成实体块的恶性Bug）
             NativeList<NativeCurveIntersectionInfo> validHits = new NativeList<NativeCurveIntersectionInfo>(allHits.Length, Allocator.Temp);
-            for (int i = 0; i < allHits.Length; i++)
+            
+            int c_idx = 0;
+            while (c_idx < allHits.Length)
             {
-                var cur = allHits[i];
-                if (validHits.Length > 0)
+                var baseHit = allHits[c_idx];
+                bool hasEntry = baseHit.IsEntry;
+                bool hasExit = !baseHit.IsEntry;
+                
+                int next_idx = c_idx + 1;
+                while (next_idx < allHits.Length)
                 {
-                    var last = validHits[validHits.Length - 1];
-                    // GlobalT极近，并且物理位置极近
-                    if (math.abs(cur.GlobalT - last.GlobalT) < 1e-5f && SqrDist(cur.Point, last.Point) < 0.0001f)
+                    var nextHit = allHits[next_idx];
+                    // 放宽 T 容错到 0.05 (避开除法精度灾难)，主要信赖物理距离 0.0001f 判定归属同一顶点簇
+                    if (math.abs(nextHit.GlobalT - baseHit.GlobalT) < 0.05f && SqrDist(nextHit.Point, baseHit.Point) < 0.0001f)
                     {
-                        if (cur.IsEntry != last.IsEntry)
-                        {
-                            validHits.Length = validHits.Length - 1; // 一进一出直接弹栈湮灭
-                            continue;
-                        }
-                        else
-                        {
-                            continue; // 两个相同类型（比如自交）则吞没一个
-                        }
+                        if (nextHit.IsEntry) hasEntry = true;
+                        else hasExit = true;
+                        next_idx++;
+                    }
+                    else
+                    {
+                        break;
                     }
                 }
-                validHits.Add(cur);
+                
+                if (hasEntry && hasExit)
+                {
+                    // 存在一进一出，证明是经过边缘的波掠 (Graze) 或是穿透了非流形触点 -> 宏观净贡献为 0，互抵消失！
+                }
+                else
+                {
+                    // 净结果为纯粹的 Entry 或纯粹的 Exit，保留其中之一作为该顶点的代表交点
+                    baseHit.IsEntry = hasEntry; // 确保属性映射正确
+                    validHits.Add(baseHit);
+                }
+                
+                c_idx = next_idx;
             }
 
             int depth = 0;
