@@ -114,7 +114,8 @@ public static class SlicerMath
                     {
                         extractedLoop.Add(path[k]);
                     }
-                    // 闭合环（回到交点）
+                    // 完美闭合物理实体环（回到交点）
+                    extractedLoop.Add(intersection);
 
                     // 截断原始路径：删除环区段以及环之后的部分（脐带尾），也删除环之前的废线头
                     // 最终只保留纯净闭合环

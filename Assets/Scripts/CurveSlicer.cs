@@ -38,7 +38,7 @@ public static class CurveSlicer
 
         bool isPureHolePunch = false;
 
-        // === Step A: 对非闭合路径——射线收敛检测 或 标准延长 ===
+        // === Step A: 对非闭合路径——仅执行稳定的标准延长 ===
         if (!isClosed)
         {
             float extensionLength = Mathf.Max(referenceRect.width, referenceRect.height) * 1.5f + 1.0f;
@@ -47,54 +47,24 @@ public static class CurveSlicer
             Vector2 headDir = (localCutPath[1] - localCutPath[0]).normalized;
             Vector2 tailDir = (localCutPath[last] - localCutPath[last - 1]).normalized;
 
-            // --- 射线收敛检测 (Ray Convergence) ---
-            if (headDir != Vector2.zero && tailDir != Vector2.zero && localCutPath.Count >= 3)
+            // 废弃旧的“射线收敛检测”，由于其面对高曲率螺旋线/钩型线时极容易暴走生成遮天蔽日的幽灵巨型闭环，
+            // 直接采用极其稳定可靠的首尾双向爆展拉飞策略，确保切割必出边界、不留暗病。
+            if (headDir != Vector2.zero)
             {
-                Vector2 headRayDir = -headDir; // P0 的反向延长方向
-                Vector2 tailRayDir = tailDir;   // PN 的正向延长方向
-
-                float crossRS = headRayDir.x * tailRayDir.y - headRayDir.y * tailRayDir.x;
-
-                if (Mathf.Abs(crossRS) > 1e-6f) // 非平行
-                {
-                    Vector2 diff = localCutPath[last] - localCutPath[0];
-                    float t = (diff.x * tailRayDir.y - diff.y * tailRayDir.x) / crossRS;
-                    float s = (diff.x * headRayDir.y - diff.y * headRayDir.x) / crossRS;
-
-                    float maxRayDist = extensionLength * 5f;
-                    if (t > 1e-4f && s > 1e-4f && t < maxRayDist && s < maxRayDist)
-                    {
-                        Vector2 meetPoint = localCutPath[0] + t * headRayDir;
-
-                        localCutPath.Insert(0, meetPoint);
-                        localCutPath.Add(meetPoint);
-                        isClosed = true;
-
-                        Debug.Log($"[Slicer] 射线收敛闭合: 交汇点 {meetPoint}, 头距 t={t:F3}, 尾距 s={s:F3}");
-                    }
-                }
+                localCutPath[0] = localCutPath[0] - headDir * extensionLength;
             }
 
-            // --- 标准延长（仅当射线收敛未触发时执行） ---
-            if (!isClosed)
+            int lastIdx = localCutPath.Count - 1;
+            if (tailDir != Vector2.zero)
             {
-                if (headDir != Vector2.zero)
-                {
-                    localCutPath[0] = localCutPath[0] - headDir * extensionLength;
-                }
+                localCutPath[lastIdx] = localCutPath[lastIdx] + tailDir * extensionLength;
+            }
 
-                int lastIdx = localCutPath.Count - 1;
-                if (tailDir != Vector2.zero)
-                {
-                    localCutPath[lastIdx] = localCutPath[lastIdx] + tailDir * extensionLength;
-                }
-
-                // 延长后自交检测（兜底：标准延长足够长时也能捕获自交闭环）
-                if (SlicerMath.DetectAndResolveSelfIntersection(localCutPath, out List<Vector2> postExtLoop))
-                {
-                    isClosed = true;
-                    Debug.Log($"[Slicer] 延长后检测到自交闭环，已提取环 ({localCutPath.Count} 点)，切换为闭环模式");
-                }
+            // 延长后自交检测（兜底：标准延长截断可能激发出新的闭合）
+            if (SlicerMath.DetectAndResolveSelfIntersection(localCutPath, out List<Vector2> postExtLoop))
+            {
+                isClosed = true;
+                Debug.Log($"[Slicer] 延长后检测到自交闭环，已提取环 ({localCutPath.Count} 点)，切换为闭环模式");
             }
         }
 
@@ -147,11 +117,12 @@ public static class CurveSlicer
                 // [完全包围] 环线全在肉内，即使包围了内部孔也是纯净的实体吞噬，走合并算法
                 isPureHolePunch = true;
             }
-            else if (emptySpaceIndex > 0)
+            else
             {
                 // [跨越边界/孔洞] 环线部分在肉外，存在拓扑切割，必须自旋对齐虚空起点
+                // 即使 emptySpaceIndex == 0 也走一遍，因为必须确保首尾在内存结构上完美物理缝合（rotated[0] = rotated[last]）
                 List<Vector2> rotated = new List<Vector2>(localCutPath.Count);
-                for (int i = emptySpaceIndex; i < localCutPath.Count - 1; i++) // -1 抛弃末尾，由最后补回
+                for (int i = emptySpaceIndex; i < localCutPath.Count - 1; i++) // -1 抛弃任何残缺的末尾
                     rotated.Add(localCutPath[i]);
                 for (int i = 0; i < emptySpaceIndex; i++)
                     rotated.Add(localCutPath[i]);
