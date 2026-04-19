@@ -1,20 +1,22 @@
 using UnityEngine;
 using Unity.Mathematics;
 using System.Collections.Generic;
+using Unity.Jobs;
 
 public struct PendingSliceTask
 {
     public SliceContext Context;
     public GameObject Target;
     public SliceableNativeData NativeData;
-    public float2 LocalStart;
-    public float2 LocalEnd;
     public Rect UVReferenceRect;
-    // 未来可扩展存入 JobHandle 等异步追踪变量
+    public JobHandle MainJobHandle;
+    // 用于处理遗留内存：存储对曲面绘制临时分配的 native arrays
+    public Unity.Collections.NativeArray<float2> CurveCutPathArray;
+    public bool IsCurve;
 }
 
 /// <summary>
-/// 全局切割任务调度器，提供异步跨帧轮询机制，并采用固定容量环形队列彻底阻断排队产生的 GC 分配。
+/// 全局切割任务调度器，提供异步跨帧轮询机制，加入单帧实例化预算保护。
 /// </summary>
 public class SlicerTaskManager : MonoBehaviour
 {
@@ -33,57 +35,61 @@ public class SlicerTaskManager : MonoBehaviour
         }
     }
 
-    // Zero-GC 环形队列
-    private PendingSliceTask[] ringBuffer = new PendingSliceTask[1024];
-    private int head = 0;
-    private int tail = 0;
+    // 使用 List 作为动态队列，支持乱序执行完毕时的中间删除
+    private List<PendingSliceTask> activeTasks = new List<PendingSliceTask>(256);
 
     public void Enqueue(PendingSliceTask task)
     {
-        int nextTail = (tail + 1) % ringBuffer.Length;
-        if (nextTail == head)
-        {
-            Debug.LogError("[SlicerTaskManager] Ring Buffer Full! Dropping task.");
-            // 需要扩容或截断，由于预设了 1024 极大容量，同帧切断 1024 次超出常规设计，直接跳过保护
-            return;
-        }
-
-        ringBuffer[tail] = task;
-        tail = nextTail;
+        activeTasks.Add(task);
     }
 
     private void Update()
     {
-        // 由于处于 Phase 1 ，我们先在 Update 里取出 Task 执行测试，验证 Context 和数据缓存能够跑通
-        // 等待 Phase 3 正式接入 JobHandle 的 IsCompleted 校验逻辑
+        if (activeTasks.Count == 0) return;
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
         
-        while (head != tail)
+        // 倒序遍历，方便在乱序完成后安全移除元素
+        for (int i = activeTasks.Count - 1; i >= 0; i--)
         {
-            PendingSliceTask task = ringBuffer[head];
-            head = (head + 1) % ringBuffer.Length;
-            
-            ProcessTaskSynchronously(task); // 本阶段暂作全同步测试
+            // 单帧预算控制：如果解析耗时超过 4ms（约占 16ms 预算的 25%），立刻截断，留到下一帧，保证高帧率平滑
+            if (sw.ElapsedMilliseconds > 4) break;
+
+            PendingSliceTask task = activeTasks[i];
+
+            if (task.MainJobHandle.IsCompleted)
+            {
+                // 彻底确保依赖冲刷与系统底层资源内存释放回调
+                task.MainJobHandle.Complete();
+                
+                // 从活动列表中移除
+                activeTasks.RemoveAt(i);
+                
+                // 清理曲线切割时的残留传递数据
+                if (task.IsCurve && task.CurveCutPathArray.IsCreated)
+                {
+                    task.CurveCutPathArray.Dispose();
+                }
+
+                // 游戏业务解耦：经过 1-3 帧异步，实体可能已经主动销毁、回收
+                if (task.Target == null)
+                {
+                    SliceContextPool.Return(task.Context);
+                    continue;
+                }
+
+                ProcessTaskResolve(task);
+            }
         }
+        sw.Stop();
     }
 
-    private void ProcessTaskSynchronously(PendingSliceTask task)
+    private void ProcessTaskResolve(PendingSliceTask task)
     {
-        // 验证目标是否依然存活，如果已被销毁（例如同一帧被另一刀清除了），直接归还 Context
-        if (task.Target == null || task.NativeData == null)
-        {
-            SliceContextPool.Return(task.Context);
-            return;
-        }
-
-        // 调用后续的核心测试运算，验证 Native 数据缓存能正确出片 
         try 
         {
-            var slicedPolygons = SlicerCore.Calculate(
-                task.NativeData.CachedVertices,
-                task.NativeData.CachedPathRanges,
-                new Vector2(task.LocalStart.x, task.LocalStart.y),
-                new Vector2(task.LocalEnd.x, task.LocalEnd.y),
-                task.Context);
+            // 将原有的在底层被强制封锁的多边形解析（托管装箱过程）脱钩到这里
+            var slicedPolygons = SlicerCore.ResolveCutResult(task.Context);
 
             if (slicedPolygons != null && slicedPolygons.Count > 0)
             {
@@ -93,10 +99,11 @@ public class SlicerTaskManager : MonoBehaviour
 
                 foreach (var polyData in slicedPolygons)
                 {
+                    // 此处包含了 PolygonHoleMerger, Triangulate(已 Burst 化) 和 GameObject 实例化
                     Slicer.CreateSlicedObject(polyData, task.Target, mat, originalRb, task.UVReferenceRect);
                 }
 
-                Destroy(task.Target); // Phase1 先继续沿用 Destroy 来消灭原物体
+                Destroy(task.Target); 
             }
         }
         catch (System.Exception e)
@@ -105,6 +112,7 @@ public class SlicerTaskManager : MonoBehaviour
         }
         finally
         {
+            // 在这一阶段必然安全收回最初发放的 context
             SliceContextPool.Return(task.Context);
         }
     }

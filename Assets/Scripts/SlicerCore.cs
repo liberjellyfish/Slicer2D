@@ -38,12 +38,12 @@ public static partial class SlicerCore
         public int SegmentIndex;
     }
 
-    public static List<PolygonData> Calculate(NativeArray<float2> pathVerts, NativeArray<int2> pathRanges, Vector2 start, Vector2 end, SliceContext sys)
+    public static JobHandle ScheduleSliceJob(NativeArray<float2> pathVerts, NativeArray<int2> pathRanges, Vector2 start, Vector2 end, SliceContext sys)
     {
         sys.ClearForReuse(); // 保险安全清理
 
         int pathsCount = pathRanges.Length;
-        if (pathsCount == 0) return null;
+        if (pathsCount == 0) return default;
 
         // Step 1: 建立无锁交叉读写的双平行域 Stream
         NativeStream edgeStream = new NativeStream(pathsCount, Allocator.TempJob);
@@ -72,48 +72,19 @@ public static partial class SlicerCore
             SliceEnd = new float2(end.x, end.y),
             RawEdges = sys.RawEdges // 直接写入池化持有的容器
         };
-        // 流水线句柄直接向后传递，取消此处的阻塞 Complete
+        // 流水线句柄直接向后传递
         var flattenHandle = flattenJob.Schedule(rebuildHandle);
 
-        // 原 RawEdges 检测已废弃，图层后续会过滤无效几何。直接进行最终向后流转。
-        RunNativeGraphPipeline(sys, flattenHandle, out List<PolygonData> solids, out List<List<Vector2>> holes);
+        var graphHandle = ScheduleNativeGraphPipeline(sys, flattenHandle);
 
-        // RunNativeGraphPipeline 已经内部 Complete 到大决堤，现在可以安全同步释放
-        edgeStream.Dispose();
-        cutHitStream.Dispose();
+        // 绑定异步依赖回收，无需主线程插手
+        edgeStream.Dispose(graphHandle);
+        cutHitStream.Dispose(graphHandle);
 
-        NativePolyTree tree = new NativePolyTree();
-        tree.Build(solids); 
-
-        for (int i = 0; i < holes.Count; i++)
-        {
-            List<Vector2> hole = holes[i];
-            if (hole.Count < 3)
-            {
-                sys.ReturnList(hole);
-                continue;
-            }
-            Vector2 testPoint = (hole[0] + hole[1]) * 0.5f;
-            float holeAreaAbs = Mathf.Abs(SignedArea(hole));
-
-            PolygonData bestParent = tree.QueryBestParent(testPoint, holeAreaAbs);
-
-            if (bestParent != null)
-            {
-                bestParent.Holes.Add(hole);
-            }
-            else
-            {
-                sys.ReturnList(hole);
-            }
-        }
-
-        tree.Dispose(); 
-
-        return solids;
+        return graphHandle;
     }
 
-    internal static void RunNativeGraphPipeline(SliceContext sys, JobHandle dependency, out List<PolygonData> solids, out List<List<Vector2>> holes)
+    internal static JobHandle ScheduleNativeGraphPipeline(SliceContext sys, JobHandle dependency)
     {
         JobHandle weldHandle = new WeldingJob {
             RawEdges = sys.RawEdges,
@@ -135,10 +106,13 @@ public static partial class SlicerCore
             LoopRanges = sys.LoopRanges
         }.Schedule(graphHandle);
 
-        extractHandle.Complete();
+        return extractHandle;
+    }
 
-        solids = new List<PolygonData>();
-        holes = new List<List<Vector2>>();
+    public static List<PolygonData> ResolveCutResult(SliceContext sys)
+    {
+        List<PolygonData> solids = new List<PolygonData>();
+        List<List<Vector2>> holes = new List<List<Vector2>>();
 
         var flatLoops = sys.FlattenedLoops.AsArray();
         for (int i = 0; i < sys.LoopRanges.Length; i++)
@@ -173,6 +147,36 @@ public static partial class SlicerCore
                 holes.Add(loop);
             }
         }
+
+        NativePolyTree tree = new NativePolyTree();
+        tree.Build(solids); 
+
+        for (int i = 0; i < holes.Count; i++)
+        {
+            List<Vector2> hole = holes[i];
+            if (hole.Count < 3)
+            {
+                sys.ReturnList(hole);
+                continue;
+            }
+            Vector2 testPoint = (hole[0] + hole[1]) * 0.5f;
+            float holeAreaAbs = Mathf.Abs(SignedArea(hole));
+
+            PolygonData bestParent = tree.QueryBestParent(testPoint, holeAreaAbs);
+
+            if (bestParent != null)
+            {
+                bestParent.Holes.Add(hole);
+            }
+            else
+            {
+                sys.ReturnList(hole);
+            }
+        }
+
+        tree.Dispose(); 
+
+        return solids;
     }
 
     public static void ReturnResultToPool(List<PolygonData> results, SliceContext sys)

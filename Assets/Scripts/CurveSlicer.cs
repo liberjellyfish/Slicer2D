@@ -140,58 +140,38 @@ public static class CurveSlicer
         }
 
         // ==============================================================
-        // Phase 3 调度：激活或提取原生缓冲组件，装卸原生流数组。
+        // Phase 1 异步调度：激活或提取原生缓冲组件，下发到底层线程挂机。
         // ==============================================================
         SliceableNativeData nativeData = target.GetComponent<SliceableNativeData>();
         if (nativeData == null) nativeData = target.AddComponent<SliceableNativeData>();
 
-        NativeArray<Unity.Mathematics.float2> nativeCutPath = new NativeArray<Unity.Mathematics.float2>(localCutPath.Count, Allocator.TempJob);
+        // 跨帧数据容器，由于要在完成后的 Update 周期回收，必须使用 Persistent
+        NativeArray<Unity.Mathematics.float2> nativeCutPath = new NativeArray<Unity.Mathematics.float2>(localCutPath.Count, Allocator.Persistent);
         for (int i = 0; i < localCutPath.Count; i++) nativeCutPath[i] = new Unity.Mathematics.float2(localCutPath[i].x, localCutPath[i].y);
 
         SliceContext context = SliceContextPool.Get();
 
-        // 调用原生核芯引擎
-        List<SlicerCore.PolygonData> slicedPolygons = null;
-        try
-        {
-            slicedPolygons = CurveSlicerCore.CalculateCurve(nativeData.CachedVertices, nativeData.CachedPathRanges, nativeCutPath, context);
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"[Slicer] Native CurveSlice Error: {e.Message}\n{e.StackTrace}");
-            return;
-        }
-        finally
-        {
-            nativeCutPath.Dispose();
-            // 不在此处回收 Context！由于最后同步调用，它需要在返回的 List 使用完毕后才被回收
-            // 但是我们的 Result 现在由 Context 独立返回了，我们在网格生成完毕后归还 Context 即可。
-        }
+        // 立即发车，将重负荷工作扔给 Worker Thread
+        Unity.Jobs.JobHandle handle = CurveSlicerCore.ScheduleCurveSliceJob(
+            nativeData.CachedVertices, 
+            nativeData.CachedPathRanges, 
+            nativeCutPath, 
+            context
+        );
 
-        if (slicedPolygons == null || slicedPolygons.Count == 0) return;
+        PendingSliceTask task = new PendingSliceTask
+        {
+            Context = context,
+            Target = target,
+            NativeData = nativeData,
+            UVReferenceRect = referenceRect,
+            MainJobHandle = handle,
+            CurveCutPathArray = nativeCutPath,
+            IsCurve = true
+        };
 
-        bool success = true;
-        try
-        {
-            foreach (var polyData in slicedPolygons)
-            {
-                Slicer.CreateSlicedObject(polyData, target, meshRenderer.sharedMaterial, originalRb, referenceRect);
-            }
-        }
-        catch (System.Exception e)
-        {
-            success = false;
-            Debug.LogError($"[Slicer] CurveSlice MeshGen Error: {e.Message}");
-        }
-        finally
-        {
-            SliceContextPool.Return(context); // 极其重要：在全部执行末尾归还整个 Context 树！
-        }
-
-        if (success)
-        {
-            Object.Destroy(target);
-        }
+        // 解放主线程：把返回凭证塞进任务中心轮询
+        SlicerTaskManager.Instance.Enqueue(task);
     }
 
     /// <summary>

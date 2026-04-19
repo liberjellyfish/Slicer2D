@@ -27,7 +27,7 @@ public static class Slicer
         localSliceStart = localSliceStart - cutDirection * extensionLength;
         localSliceEnd = localSliceEnd + cutDirection * extensionLength;
 
-        // --- Phase 1 引流：拦截常规执行流，提交到原生异步管理器 ---
+        // --- Phase 1 引流：立即排期切割 Job，将依赖句柄送入队列做跨帧轮询 ---
         
         // 获取或注入 Native 数据中间件
         SliceableNativeData nativeData = target.GetComponent<SliceableNativeData>();
@@ -40,14 +40,23 @@ public static class Slicer
         // 从池中提取 Context 令牌
         SliceContext context = SliceContextPool.Get();
 
+        // 立刻发车到底层 Burst 线程池
+        Unity.Jobs.JobHandle handle = SlicerCore.ScheduleSliceJob(
+            nativeData.CachedVertices,
+            nativeData.CachedPathRanges,
+            localSliceStart,
+            localSliceEnd,
+            context
+        );
+
         PendingSliceTask task = new PendingSliceTask
         {
             Context = context,
             Target = target,
             NativeData = nativeData,
-            LocalStart = new Unity.Mathematics.float2(localSliceStart.x, localSliceStart.y),
-            LocalEnd = new Unity.Mathematics.float2(localSliceEnd.x, localSliceEnd.y),
-            UVReferenceRect = referenceRect
+            UVReferenceRect = referenceRect,
+            MainJobHandle = handle,
+            IsCurve = false
         };
 
         // 提交跨帧任务队列，彻底解耦调用。在队列后续执行完前，不再阻断主帧。

@@ -405,4 +405,10 @@ public struct NativeAABBTree : IDisposable
         if (nodes.IsCreated) nodes.Dispose();
         if (segments.IsCreated) segments.Dispose();
     }
+
+    public void Dispose(Unity.Jobs.JobHandle inputDeps)
+    {
+        if (nodes.IsCreated) nodes.Dispose(inputDeps);
+        if (segments.IsCreated) segments.Dispose(inputDeps);
+    }
 }
