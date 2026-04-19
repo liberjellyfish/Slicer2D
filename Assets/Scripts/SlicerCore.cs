@@ -38,14 +38,6 @@ public static partial class SlicerCore
         public int SegmentIndex;
     }
 
-    // 兼容原版的 Calculate 保留不删，防止 CurveSlicer 报错
-    public static List<PolygonData> Calculate(List<List<Vector2>> originalPaths, Vector2 start, Vector2 end)
-    {
-        // 这一版本依然对接老旧的 SlicerSystem 单例，仅用于 CurveSlicerCore，我们将提供新的 Native 重载用于直线切割 Phase 1 
-        // （直接复用老的实现，省略这里避免重复污染代码）
-        return null; // Phase 1 废弃原托管 Calculate
-    }
-
     public static List<PolygonData> Calculate(NativeArray<float2> pathVerts, NativeArray<int2> pathRanges, Vector2 start, Vector2 end, SliceContext sys)
     {
         sys.ClearForReuse(); // 保险安全清理
@@ -121,73 +113,9 @@ public static partial class SlicerCore
         return solids;
     }
 
-    internal static void RunNativeGraphPipeline(out List<PolygonData> solids, out List<List<Vector2>> holes)
-    {
-        var sys = SlicerSystem.Instance;
-
-        JobHandle weldHandle = new SlicerSystem.WeldingJob {
-            RawEdges = sys.RawEdges,
-            UniqueVertices = sys.UniqueVertices,
-            AliasMap = sys.AliasMap,
-            ToleranceSq = 1e-8f, 
-            ToleranceX = 1e-4f   
-        }.Schedule();
-
-        JobHandle graphHandle = new SlicerSystem.BuildGraphJob {
-            AliasMap = sys.AliasMap,
-            Graph = sys.NativeGraph
-        }.Schedule(weldHandle);
-
-        JobHandle extractHandle = new SlicerSystem.ExtractLoopsJob {
-            Graph = sys.NativeGraph,
-            UniqueVertices = sys.UniqueVertices,
-            FlattenedLoops = sys.FlattenedLoops,
-            LoopRanges = sys.LoopRanges
-        }.Schedule(graphHandle);
-
-        extractHandle.Complete();
-
-        solids = new List<PolygonData>();
-        holes = new List<List<Vector2>>();
-
-        var flatLoops = sys.FlattenedLoops.AsArray();
-        for (int i = 0; i < sys.LoopRanges.Length; i++)
-        {
-            int2 range = sys.LoopRanges[i];
-            List<Vector2> rawLoop = sys.GetList();
-            for(int k = 0; k < range.y; k++) {
-                float2 v = flatLoops[range.x + k];
-                rawLoop.Add(new Vector2(v.x, v.y));
-            }
-            
-            List<Vector2> loop = SimplifyPath(rawLoop);
-            sys.ReturnList(rawLoop);
-
-            float area = SignedArea(loop);
-            if (Mathf.Abs(area) < AREA_THRESHOLD)
-            {
-                sys.ReturnList(loop);
-                continue;
-            }
-
-            if (area > 0)
-            {
-                PolygonData poly = sys.GetPoly();
-                poly.OuterLoop = loop;
-                poly.Area = area;
-                poly.Bounds = CalculateBounds(loop);
-                solids.Add(poly);
-            }
-            else
-            {
-                holes.Add(loop);
-            }
-        }
-    }
-
     internal static void RunNativeGraphPipeline(SliceContext sys, JobHandle dependency, out List<PolygonData> solids, out List<List<Vector2>> holes)
     {
-        JobHandle weldHandle = new SlicerSystem.WeldingJob {
+        JobHandle weldHandle = new WeldingJob {
             RawEdges = sys.RawEdges,
             UniqueVertices = sys.UniqueVertices,
             AliasMap = sys.AliasMap,
@@ -195,12 +123,12 @@ public static partial class SlicerCore
             ToleranceX = 1e-4f   
         }.Schedule(dependency);
 
-        JobHandle graphHandle = new SlicerSystem.BuildGraphJob {
+        JobHandle graphHandle = new BuildGraphJob {
             AliasMap = sys.AliasMap,
             Graph = sys.NativeGraph
         }.Schedule(weldHandle);
 
-        JobHandle extractHandle = new SlicerSystem.ExtractLoopsJob {
+        JobHandle extractHandle = new ExtractLoopsJob {
             Graph = sys.NativeGraph,
             UniqueVertices = sys.UniqueVertices,
             FlattenedLoops = sys.FlattenedLoops,
@@ -244,15 +172,6 @@ public static partial class SlicerCore
             {
                 holes.Add(loop);
             }
-        }
-    }
-
-    public static void ReturnResultToPool(List<PolygonData> results)
-    {
-        if (results == null) return;
-        foreach (var poly in results)
-        {
-            SlicerSystem.Instance.ReturnPoly(poly);
         }
     }
 
@@ -300,30 +219,6 @@ public static partial class SlicerCore
             if (t >= -1e-5f && t <= 1f + 1e-5f) return true;
         }
         return false;
-    }
-
-    internal static List<Vector2> SimplifyPath(List<Vector2> path)
-    {
-        var sys = SlicerSystem.Instance;
-        if (path.Count < 3)
-        {
-            var copy = sys.GetList();
-            copy.AddRange(path);
-            return copy;
-        }
-
-        List<Vector2> simplified = sys.GetList();
-        simplified.Add(path[0]);
-        for (int i = 1; i < path.Count; i++)
-        {
-            if (SqrDist(path[i], simplified[simplified.Count - 1]) > MIN_VERT_DIST_SQ)
-                simplified.Add(path[i]);
-        }
-
-        if (simplified.Count > 2 && SqrDist(simplified[0], simplified[simplified.Count - 1]) < MIN_VERT_DIST_SQ)
-            simplified.RemoveAt(simplified.Count - 1);
-
-        return simplified;
     }
 
     internal static List<Vector2> SimplifyPath(List<Vector2> path, SliceContext sys)
