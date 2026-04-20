@@ -83,7 +83,7 @@ public static class Slicer
         }
         return new Rect(minX, minY, maxX - minX, maxY - minY);
     }
-    internal static void CreateSlicedObject(SlicerCore.PolygonData data, GameObject originalTemplate, Material mat, Rigidbody2D originalRb, Rect uvRefRect)
+    internal static void CreateSlicedObject(SlicerCore.PolygonData data, GameObject originalTemplate, Material mat, Rigidbody2D originalRb, Rect uvRefRect, SliceContext nativeCtx = null)
     {
         string baseName = originalTemplate.name.Replace("_Piece", "");
         GameObject newObj = new GameObject(baseName + "_Piece");
@@ -125,13 +125,16 @@ public static class Slicer
         MeshRenderer mr = newObj.AddComponent<MeshRenderer>();
         mr.material = mat;
 
+        // --- 碰撞体设置：使用 List<Vector2> 重载避免 ToArray() 的 GC ---
         PolygonCollider2D pc = newObj.AddComponent<PolygonCollider2D>();
+        pc.enabled = false; // 延迟物理重建：批量设完后再启用，避免每次 SetPath 触发凸分解
         pc.pathCount = 1 + data.Holes.Count;
-        pc.SetPath(0, data.OuterLoop.ToArray());
+        pc.SetPath(0, data.OuterLoop);  // List<Vector2> 重载，零拷贝
         for (int i = 0; i < data.Holes.Count; i++)
         {
-            pc.SetPath(i + 1, data.Holes[i].ToArray());
+            pc.SetPath(i + 1, data.Holes[i]);
         }
+        pc.enabled = true; // 统一触发一次物理重建
 
         SliceableGenerator newGen = newObj.AddComponent<SliceableGenerator>();
         newGen.hasUVReference = true;

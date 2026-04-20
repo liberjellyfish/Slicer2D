@@ -100,7 +100,7 @@ public class SlicerTaskManager : MonoBehaviour
                 foreach (var polyData in slicedPolygons)
                 {
                     // 此处包含了 PolygonHoleMerger, Triangulate(已 Burst 化) 和 GameObject 实例化
-                    Slicer.CreateSlicedObject(polyData, task.Target, mat, originalRb, task.UVReferenceRect);
+                    Slicer.CreateSlicedObject(polyData, task.Target, mat, originalRb, task.UVReferenceRect, task.Context);
                 }
 
                 Destroy(task.Target); 

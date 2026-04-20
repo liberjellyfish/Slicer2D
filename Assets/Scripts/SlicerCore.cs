@@ -16,15 +16,22 @@ public static partial class SlicerCore
         public float Area;
         public Bounds Bounds;
 
+        // Phase 5 Native 范围索引（指向 SliceContext.FlattenedLoops）
+        public int2 NativeOuterRange;            // (start, count) in FlattenedLoops
+        public List<int2> NativeHoleRanges;       // 每个孔洞的 (start, count)
+
         public PolygonData() { } 
 
         public void Init()
         {
             if (Holes == null) Holes = new List<List<Vector2>>();
             else Holes.Clear();
+            if (NativeHoleRanges == null) NativeHoleRanges = new List<int2>();
+            else NativeHoleRanges.Clear();
             OuterLoop = null; 
             Area = 0;
             Bounds = default;
+            NativeOuterRange = default;
         }
     }
 
@@ -161,6 +168,7 @@ public static partial class SlicerCore
             PolygonData poly = sys.GetPoly();
             poly.OuterLoop = loop;
             poly.Area = sys.LoopAreas[i];
+            poly.NativeOuterRange = range; // 记录 Native 范围索引
             float4 b = sys.LoopBounds[i];
             poly.Bounds = new Bounds(
                 new Vector3((b.x + b.z) * 0.5f, (b.y + b.w) * 0.5f, 0),
@@ -191,6 +199,7 @@ public static partial class SlicerCore
             }
 
             solidMap[parentIdx].Holes.Add(hole);
+            solidMap[parentIdx].NativeHoleRanges.Add(range); // 记录孔洞 Native 范围
         }
 
         return solids;
