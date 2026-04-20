@@ -117,7 +117,10 @@ public static class Slicer
         mesh.vertices = vertices3D;
         mesh.uv = uvs;
         mesh.triangles = indices;
-        mesh.RecalculateNormals();
+        // 2D 场景法线恒定为 (0,0,-1)，硬编码跳过 RecalculateNormals 的全 mesh 叉积遍历
+        Vector3[] normals = new Vector3[vertices3D.Length];
+        for (int i = 0; i < normals.Length; i++) normals[i] = new Vector3(0, 0, -1);
+        mesh.normals = normals;
         mesh.RecalculateBounds();
 
         MeshFilter mf = newObj.AddComponent<MeshFilter>();

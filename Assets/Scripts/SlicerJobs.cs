@@ -627,24 +627,24 @@ public static partial class SlicerCore
 
         public void Execute()
         {
+            // O(1) 哈希去重替代 O(degree) 线性扫描
+            NativeHashSet<long> edgeSet = new NativeHashSet<long>(AliasMap.Length, Allocator.Temp);
+
             for (int i = 0; i < AliasMap.Length; i += 2)
             {
                 int u = AliasMap[i];
                 int v = AliasMap[i + 1];
 
-                if (u == v) continue; 
+                if (u == v) continue;
 
-                // 查重过滤
-                bool exists = false;
-                if (Graph.TryGetFirstValue(u, out int neighbor, out var iterator))
+                long edgeKey = ((long)u << 32) | (uint)v;
+                if (edgeSet.Add(edgeKey))
                 {
-                    do {
-                        if (neighbor == v) { exists = true; break; }
-                    } while (Graph.TryGetNextValue(out neighbor, ref iterator));
+                    Graph.Add(u, v);
                 }
-
-                if (!exists) Graph.Add(u, v);
             }
+
+            edgeSet.Dispose();
         }
     }
 
@@ -731,10 +731,11 @@ public static partial class SlicerCore
             if (lenSq < 1e-10f) inDir = new float2(1, 0); 
             
             FixedList64Bytes<int> neighbors = new FixedList64Bytes<int>();
+            int degree = Graph.CountValuesForKey(curr); // 循环外缓存度数，避免 O(D²)
             if (Graph.TryGetFirstValue(curr, out int n, out var it))
             {
                 do {
-                    if (n == prev && Graph.CountValuesForKey(curr) > 1) continue; 
+                    if (n == prev && degree > 1) continue; 
                     if (neighbors.Length < 15) neighbors.Add(n);
                 } while (Graph.TryGetNextValue(out n, ref it));
             }
