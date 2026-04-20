@@ -122,25 +122,35 @@ public static partial class SlicerCore
             AreaThreshold = AREA_THRESHOLD
         }.Schedule(simplifyHandle);
 
-        return classifyHandle;
+        // Phase 5b: 孔洞归属分配（全 Native PointInPolygon，替代主线程 NativePolyTree）
+        JobHandle assignHandle = new AssignHolesJob {
+            FlattenedLoops = sys.FlattenedLoops,
+            LoopRanges = sys.LoopRanges,
+            LoopTypes = sys.LoopTypes,
+            LoopAreas = sys.LoopAreas,
+            LoopBounds = sys.LoopBounds,
+            HoleParents = sys.HoleParents
+        }.Schedule(classifyHandle);
+
+        return assignHandle;
     }
 
     public static List<PolygonData> ResolveCutResult(SliceContext sys)
     {
         List<PolygonData> solids = new List<PolygonData>();
-        List<List<Vector2>> holes = new List<List<Vector2>>();
-        List<float> holeAreas = new List<float>();
+        int loopCount = sys.LoopRanges.Length;
+
+        // 临时索引表：loopIndex → PolygonData（仅 solid 有值）
+        PolygonData[] solidMap = new PolygonData[loopCount];
 
         var flatLoops = sys.FlattenedLoops.AsArray();
-        for (int i = 0; i < sys.LoopRanges.Length; i++)
+
+        // 第一遍：构建所有 solid 的 PolygonData
+        for (int i = 0; i < loopCount; i++)
         {
-            // 使用 Burst Job 预计算的分类结果，跳过主线程的 SimplifyPath / SignedArea
-            int loopType = sys.LoopTypes[i];
-            if (loopType == 0) continue; // 已被 SimplifyLoopsJob + ClassifyLoopsJob 标记为废弃
+            if (sys.LoopTypes[i] != 1) continue;
 
             int2 range = sys.LoopRanges[i];
-
-            // 从已简化的 Native 数据直接构建 List<Vector2>（不再需要 SimplifyPath）
             List<Vector2> loop = sys.GetList();
             for (int k = 0; k < range.y; k++)
             {
@@ -148,52 +158,40 @@ public static partial class SlicerCore
                 loop.Add(new Vector2(v.x, v.y));
             }
 
-            if (loopType == 1) // solid (CCW, area > 0)
-            {
-                PolygonData poly = sys.GetPoly();
-                poly.OuterLoop = loop;
-                poly.Area = sys.LoopAreas[i];
-                float4 b = sys.LoopBounds[i];
-                poly.Bounds = new Bounds(
-                    new Vector3((b.x + b.z) * 0.5f, (b.y + b.w) * 0.5f, 0),
-                    new Vector3(b.z - b.x, b.w - b.y, 1)
-                );
-                solids.Add(poly);
-            }
-            else // hole (CW, area < 0)
-            {
-                holes.Add(loop);
-                holeAreas.Add(sys.LoopAreas[i]);
-            }
+            PolygonData poly = sys.GetPoly();
+            poly.OuterLoop = loop;
+            poly.Area = sys.LoopAreas[i];
+            float4 b = sys.LoopBounds[i];
+            poly.Bounds = new Bounds(
+                new Vector3((b.x + b.z) * 0.5f, (b.y + b.w) * 0.5f, 0),
+                new Vector3(b.z - b.x, b.w - b.y, 1)
+            );
+
+            solidMap[i] = poly;
+            solids.Add(poly);
         }
 
-        NativePolyTree tree = new NativePolyTree();
-        tree.Build(solids); 
-
-        for (int i = 0; i < holes.Count; i++)
+        // 第二遍：直接读取 AssignHolesJob 的预计算归属，将孔洞挂载到父级 solid
+        for (int i = 0; i < loopCount; i++)
         {
-            List<Vector2> hole = holes[i];
-            if (hole.Count < 3)
-            {
-                sys.ReturnList(hole);
+            if (sys.LoopTypes[i] != -1) continue;
+
+            int2 range = sys.LoopRanges[i];
+            if (range.y < 3) continue;
+
+            int parentIdx = sys.HoleParents[i];
+            if (parentIdx < 0 || parentIdx >= loopCount || solidMap[parentIdx] == null)
                 continue;
-            }
-            Vector2 testPoint = (hole[0] + hole[1]) * 0.5f;
-            float holeAreaAbs = holeAreas[i]; // 直接使用 ClassifyLoopsJob 预计算的面积
 
-            PolygonData bestParent = tree.QueryBestParent(testPoint, holeAreaAbs);
+            List<Vector2> hole = sys.GetList();
+            for (int k = 0; k < range.y; k++)
+            {
+                float2 v = flatLoops[range.x + k];
+                hole.Add(new Vector2(v.x, v.y));
+            }
 
-            if (bestParent != null)
-            {
-                bestParent.Holes.Add(hole);
-            }
-            else
-            {
-                sys.ReturnList(hole);
-            }
+            solidMap[parentIdx].Holes.Add(hole);
         }
-
-        tree.Dispose(); 
 
         return solids;
     }

@@ -923,4 +923,52 @@ public static partial class SlicerCore
             }
         }
     }
+
+    /// <summary>
+    /// 孔洞归属分配 Job：对每个 hole 环找到包含它的最小面积 solid 环。
+    /// 使用 NativePolyTree (BVH) 加速空间查询，复杂度 O(H * logS * V)。
+    /// 完全在工作线程执行，替代主线程的 NativePolyTree 构建与查询。
+    /// </summary>
+    [BurstCompile(CompileSynchronously = true, FloatMode = FloatMode.Fast)]
+    public struct AssignHolesJob : IJob
+    {
+        [ReadOnly] public NativeList<float2> FlattenedLoops;
+        [ReadOnly] public NativeList<int2> LoopRanges;
+        [ReadOnly] public NativeList<int> LoopTypes;
+        [ReadOnly] public NativeList<float> LoopAreas;
+        [ReadOnly] public NativeList<float4> LoopBounds;
+
+        public NativeList<int> HoleParents; // 输出：每个环的父级 solid 环索引，-1 = 非孔洞或无归属
+
+        public void Execute()
+        {
+            int loopCount = LoopRanges.Length;
+            HoleParents.Length = loopCount;
+
+            for (int i = 0; i < loopCount; i++) HoleParents[i] = -1;
+
+            // 构建 BVH（Allocator.Temp，Execute 结束后自动释放）
+            NativePolyTree tree = new NativePolyTree();
+            tree.Build(FlattenedLoops, LoopRanges, LoopTypes, LoopAreas, LoopBounds);
+
+            // 对每个孔洞执行 BVH 加速查询
+            for (int h = 0; h < loopCount; h++)
+            {
+                if (LoopTypes[h] != -1) continue;
+
+                int2 hRange = LoopRanges[h];
+                if (hRange.y < 3) continue;
+
+                // 测试点 = 前两个顶点的中点
+                float2 p0 = FlattenedLoops[hRange.x];
+                float2 p1 = FlattenedLoops[hRange.x + 1];
+                float2 testPoint = (p0 + p1) * 0.5f;
+                float holeArea = LoopAreas[h];
+
+                HoleParents[h] = tree.QueryBestParent(testPoint, holeArea);
+            }
+
+            tree.Dispose();
+        }
+    }
 }

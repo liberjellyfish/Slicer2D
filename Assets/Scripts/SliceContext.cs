@@ -21,6 +21,7 @@ public class SliceContext : IDisposable
     public NativeList<int> LoopTypes;       // 0=discard, 1=solid(CCW), -1=hole(CW)
     public NativeList<float> LoopAreas;     // 绝对面积
     public NativeList<float4> LoopBounds;   // (minX, minY, maxX, maxY)
+    public NativeList<int> HoleParents;     // 孔洞→父级solid的环索引，-1=非孔洞或无归属
 
     // ---- 拓扑重建托管容器 (用于 Phase 3 还原为 Unity Mesh) ----
     public Stack<List<Vector2>> ListPool;
@@ -46,6 +47,7 @@ public class SliceContext : IDisposable
         LoopTypes = new NativeList<int>(128, Allocator.Persistent);
         LoopAreas = new NativeList<float>(128, Allocator.Persistent);
         LoopBounds = new NativeList<float4>(128, Allocator.Persistent);
+        HoleParents = new NativeList<int>(128, Allocator.Persistent);
 
         ListPool = new Stack<List<Vector2>>();
         PolyPool = new Stack<SlicerCore.PolygonData>();
@@ -73,6 +75,7 @@ public class SliceContext : IDisposable
             LoopTypes.Clear();
             LoopAreas.Clear();
             LoopBounds.Clear();
+            HoleParents.Clear();
         }
     }
 
@@ -118,6 +121,7 @@ public class SliceContext : IDisposable
         if (LoopTypes.IsCreated) LoopTypes.Dispose();
         if (LoopAreas.IsCreated) LoopAreas.Dispose();
         if (LoopBounds.IsCreated) LoopBounds.Dispose();
+        if (HoleParents.IsCreated) HoleParents.Dispose();
     }
 }
 
