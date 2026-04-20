@@ -106,45 +106,64 @@ public static partial class SlicerCore
             LoopRanges = sys.LoopRanges
         }.Schedule(graphHandle);
 
-        return extractHandle;
+        // Phase 5: 原生路径简化 → 环分类（将原主线程 SimplifyPath + SignedArea 下沉到 Burst）
+        JobHandle simplifyHandle = new SimplifyLoopsJob {
+            FlattenedLoops = sys.FlattenedLoops,
+            LoopRanges = sys.LoopRanges,
+            MinVertDistSq = MIN_VERT_DIST_SQ
+        }.Schedule(extractHandle);
+
+        JobHandle classifyHandle = new ClassifyLoopsJob {
+            FlattenedLoops = sys.FlattenedLoops,
+            LoopRanges = sys.LoopRanges,
+            LoopTypes = sys.LoopTypes,
+            LoopAreas = sys.LoopAreas,
+            LoopBounds = sys.LoopBounds,
+            AreaThreshold = AREA_THRESHOLD
+        }.Schedule(simplifyHandle);
+
+        return classifyHandle;
     }
 
     public static List<PolygonData> ResolveCutResult(SliceContext sys)
     {
         List<PolygonData> solids = new List<PolygonData>();
         List<List<Vector2>> holes = new List<List<Vector2>>();
+        List<float> holeAreas = new List<float>();
 
         var flatLoops = sys.FlattenedLoops.AsArray();
         for (int i = 0; i < sys.LoopRanges.Length; i++)
         {
+            // 使用 Burst Job 预计算的分类结果，跳过主线程的 SimplifyPath / SignedArea
+            int loopType = sys.LoopTypes[i];
+            if (loopType == 0) continue; // 已被 SimplifyLoopsJob + ClassifyLoopsJob 标记为废弃
+
             int2 range = sys.LoopRanges[i];
-            List<Vector2> rawLoop = sys.GetList();
-            for(int k = 0; k < range.y; k++) {
-                float2 v = flatLoops[range.x + k];
-                rawLoop.Add(new Vector2(v.x, v.y));
-            }
-            
-            List<Vector2> loop = SimplifyPath(rawLoop, sys);
-            sys.ReturnList(rawLoop);
 
-            float area = SignedArea(loop);
-            if (Mathf.Abs(area) < AREA_THRESHOLD)
+            // 从已简化的 Native 数据直接构建 List<Vector2>（不再需要 SimplifyPath）
+            List<Vector2> loop = sys.GetList();
+            for (int k = 0; k < range.y; k++)
             {
-                sys.ReturnList(loop);
-                continue;
+                float2 v = flatLoops[range.x + k];
+                loop.Add(new Vector2(v.x, v.y));
             }
 
-            if (area > 0)
+            if (loopType == 1) // solid (CCW, area > 0)
             {
                 PolygonData poly = sys.GetPoly();
                 poly.OuterLoop = loop;
-                poly.Area = area;
-                poly.Bounds = CalculateBounds(loop);
+                poly.Area = sys.LoopAreas[i];
+                float4 b = sys.LoopBounds[i];
+                poly.Bounds = new Bounds(
+                    new Vector3((b.x + b.z) * 0.5f, (b.y + b.w) * 0.5f, 0),
+                    new Vector3(b.z - b.x, b.w - b.y, 1)
+                );
                 solids.Add(poly);
             }
-            else
+            else // hole (CW, area < 0)
             {
                 holes.Add(loop);
+                holeAreas.Add(sys.LoopAreas[i]);
             }
         }
 
@@ -160,7 +179,7 @@ public static partial class SlicerCore
                 continue;
             }
             Vector2 testPoint = (hole[0] + hole[1]) * 0.5f;
-            float holeAreaAbs = Mathf.Abs(SignedArea(hole));
+            float holeAreaAbs = holeAreas[i]; // 直接使用 ClassifyLoopsJob 预计算的面积
 
             PolygonData bestParent = tree.QueryBestParent(testPoint, holeAreaAbs);
 

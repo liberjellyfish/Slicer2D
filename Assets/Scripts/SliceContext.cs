@@ -17,6 +17,11 @@ public class SliceContext : IDisposable
     public NativeList<float2> FlattenedLoops;
     public NativeList<int2> LoopRanges; // start_idx, count
 
+    // ---- Phase 5 预计算分类结果 (由 SimplifyLoopsJob + ClassifyLoopsJob 写入) ----
+    public NativeList<int> LoopTypes;       // 0=discard, 1=solid(CCW), -1=hole(CW)
+    public NativeList<float> LoopAreas;     // 绝对面积
+    public NativeList<float4> LoopBounds;   // (minX, minY, maxX, maxY)
+
     // ---- 拓扑重建托管容器 (用于 Phase 3 还原为 Unity Mesh) ----
     public Stack<List<Vector2>> ListPool;
     public Stack<SlicerCore.PolygonData> PolyPool;
@@ -38,6 +43,9 @@ public class SliceContext : IDisposable
         NativeGraph = new NativeParallelMultiHashMap<int, int>(capacity, Allocator.Persistent);
         FlattenedLoops = new NativeList<float2>(capacity * 2, Allocator.Persistent);
         LoopRanges = new NativeList<int2>(128, Allocator.Persistent);
+        LoopTypes = new NativeList<int>(128, Allocator.Persistent);
+        LoopAreas = new NativeList<float>(128, Allocator.Persistent);
+        LoopBounds = new NativeList<float4>(128, Allocator.Persistent);
 
         ListPool = new Stack<List<Vector2>>();
         PolyPool = new Stack<SlicerCore.PolygonData>();
@@ -62,6 +70,9 @@ public class SliceContext : IDisposable
             NativeGraph.Clear();
             FlattenedLoops.Clear();
             LoopRanges.Clear();
+            LoopTypes.Clear();
+            LoopAreas.Clear();
+            LoopBounds.Clear();
         }
     }
 
@@ -104,6 +115,9 @@ public class SliceContext : IDisposable
         if (NativeGraph.IsCreated) NativeGraph.Dispose();
         if (FlattenedLoops.IsCreated) FlattenedLoops.Dispose();
         if (LoopRanges.IsCreated) LoopRanges.Dispose();
+        if (LoopTypes.IsCreated) LoopTypes.Dispose();
+        if (LoopAreas.IsCreated) LoopAreas.Dispose();
+        if (LoopBounds.IsCreated) LoopBounds.Dispose();
     }
 }
 

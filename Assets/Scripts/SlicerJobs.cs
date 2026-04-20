@@ -784,4 +784,143 @@ public static partial class SlicerCore
             return 0; // Backward Line
         }
     }
+
+    // =================================================================================
+    //                    Phase 5 原生路径简化与环分类 Job
+    // =================================================================================
+
+    /// <summary>
+    /// 在 FlattenedLoops 上对每个环做原地顶点去重压缩。
+    /// 替代主线程的 SimplifyPath，消灭中间 List&lt;Vector2&gt; 分配。
+    /// </summary>
+    [BurstCompile(CompileSynchronously = true, FloatMode = FloatMode.Fast)]
+    public struct SimplifyLoopsJob : IJob
+    {
+        public NativeList<float2> FlattenedLoops;
+        public NativeList<int2> LoopRanges;
+        public float MinVertDistSq;
+
+        public void Execute()
+        {
+            for (int loopIdx = 0; loopIdx < LoopRanges.Length; loopIdx++)
+            {
+                int2 range = LoopRanges[loopIdx];
+                int start = range.x;
+                int count = range.y;
+
+                if (count < 3) continue;
+
+                // 保留第一个顶点，从第二个开始扫掠压缩
+                int writeIdx = 1;
+
+                for (int i = 1; i < count; i++)
+                {
+                    float2 prev = FlattenedLoops[start + writeIdx - 1];
+                    float2 curr = FlattenedLoops[start + i];
+                    float dx = curr.x - prev.x;
+                    float dy = curr.y - prev.y;
+                    if (dx * dx + dy * dy > MinVertDistSq)
+                    {
+                        FlattenedLoops[start + writeIdx] = curr;
+                        writeIdx++;
+                    }
+                }
+
+                // 检查首尾是否过近，如果是则去掉末尾点
+                if (writeIdx > 2)
+                {
+                    float2 first = FlattenedLoops[start];
+                    float2 last = FlattenedLoops[start + writeIdx - 1];
+                    float dx = first.x - last.x;
+                    float dy = first.y - last.y;
+                    if (dx * dx + dy * dy < MinVertDistSq)
+                    {
+                        writeIdx--;
+                    }
+                }
+
+                // 原地更新范围长度（起始位置不变，间隙留空无害）
+                LoopRanges[loopIdx] = new int2(start, writeIdx);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 为每个环计算有向面积 (SignedArea)、AABB 包围盒，并分类为：
+    ///   1 = Solid (CCW, area &gt; 0)
+    ///  -1 = Hole  (CW,  area &lt; 0)
+    ///   0 = Discard (面积过小或顶点不足)
+    /// 替代主线程的 SignedArea + CalculateBounds + 面积判定。
+    /// </summary>
+    [BurstCompile(CompileSynchronously = true, FloatMode = FloatMode.Fast)]
+    public struct ClassifyLoopsJob : IJob
+    {
+        [ReadOnly] public NativeList<float2> FlattenedLoops;
+        [ReadOnly] public NativeList<int2> LoopRanges;
+        public NativeList<int> LoopTypes;
+        public NativeList<float> LoopAreas;
+        public NativeList<float4> LoopBounds;
+        public float AreaThreshold;
+
+        public void Execute()
+        {
+            int loopCount = LoopRanges.Length;
+            LoopTypes.Length = loopCount;
+            LoopAreas.Length = loopCount;
+            LoopBounds.Length = loopCount;
+
+            for (int loopIdx = 0; loopIdx < loopCount; loopIdx++)
+            {
+                int2 range = LoopRanges[loopIdx];
+                int start = range.x;
+                int count = range.y;
+
+                if (count < 3)
+                {
+                    LoopTypes[loopIdx] = 0;
+                    LoopAreas[loopIdx] = 0;
+                    LoopBounds[loopIdx] = float4.zero;
+                    continue;
+                }
+
+                // 单次遍历同时计算有向面积与包围盒
+                float area = 0;
+                float minX = float.MaxValue, minY = float.MaxValue;
+                float maxX = float.MinValue, maxY = float.MinValue;
+
+                for (int i = 0; i < count; i++)
+                {
+                    float2 p1 = FlattenedLoops[start + i];
+                    float2 p2 = FlattenedLoops[start + ((i + 1) % count)];
+                    area += (p1.x * p2.y) - (p2.x * p1.y);
+
+                    if (p1.x < minX) minX = p1.x;
+                    if (p1.x > maxX) maxX = p1.x;
+                    if (p1.y < minY) minY = p1.y;
+                    if (p1.y > maxY) maxY = p1.y;
+                }
+                area *= 0.5f;
+
+                float absArea = math.abs(area);
+                if (absArea < AreaThreshold)
+                {
+                    LoopTypes[loopIdx] = 0;
+                    LoopAreas[loopIdx] = 0;
+                    LoopBounds[loopIdx] = float4.zero;
+                }
+                else if (area > 0)
+                {
+                    LoopTypes[loopIdx] = 1;
+                    LoopAreas[loopIdx] = absArea;
+                    LoopBounds[loopIdx] = new float4(minX, minY, maxX, maxY);
+                }
+                else
+                {
+                    LoopTypes[loopIdx] = -1;
+                    LoopAreas[loopIdx] = absArea;
+                    LoopBounds[loopIdx] = new float4(minX, minY, maxX, maxY);
+                }
+            }
+        }
+    }
 }
