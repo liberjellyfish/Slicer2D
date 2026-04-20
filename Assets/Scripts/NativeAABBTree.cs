@@ -38,13 +38,10 @@ public struct NativeAABBTree : IDisposable
         /// 快速检测 AABB 重叠 (内联优化)
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool IntersectsBox(Vector2 p1, Vector2 p2)
+        public bool IntersectsBox(float2 p1, float2 p2)
         {
-            // 计算线段的 AABB
             float sMinX = p1.x < p2.x ? p1.x : p2.x;
             float sMaxX = p1.x > p2.x ? p1.x : p2.x;
-
-            // 分离轴定理 (SAT) 的简化版：AABB 不重叠
             if (sMinX > maxX || sMaxX < minX) return false;
 
             float sMinY = p1.y < p2.y ? p1.y : p2.y;
@@ -177,6 +174,59 @@ public struct NativeAABBTree : IDisposable
     }
 
     /// <summary>
+    /// 从 FlattenedLoops 的范围切片构建 AABB 树（用于 MergeNative 的零拷贝通道）
+    /// </summary>
+    public void Build(NativeArray<float2> flatLoops, int2 outerRange, List<int2> holeRanges)
+    {
+        int totalEdges = outerRange.y;
+        if (holeRanges != null)
+        {
+            for (int i = 0; i < holeRanges.Count; i++) totalEdges += holeRanges[i].y;
+        }
+
+        segments = new NativeArray<Segment>(totalEdges, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        nodes = new NativeArray<FlatNode>(totalEdges * 2, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+
+        int ptr = 0;
+        AddSegmentsFromNativeLoop(flatLoops, outerRange.x, outerRange.y, ref ptr, 0);
+        if (holeRanges != null)
+        {
+            for (int i = 0; i < holeRanges.Count; i++)
+                AddSegmentsFromNativeLoop(flatLoops, holeRanges[i].x, holeRanges[i].y, ref ptr, i + 1);
+        }
+
+        nodesUsed = 0;
+        if (totalEdges > 0)
+        {
+            BuildRecursive(0, totalEdges);
+        }
+    }
+
+    private void AddSegmentsFromNativeLoop(NativeArray<float2> flatLoops, int start, int count, ref int ptr, int pathId)
+    {
+        if (count < 2) return;
+        for (int i = 0; i < count; i++)
+        {
+            if (ptr >= segments.Length) break;
+            float2 p1 = flatLoops[start + i];
+            float2 p2 = flatLoops[start + ((i + 1) % count)];
+
+            Segment s = new Segment();
+            s.P1 = p1;
+            s.P2 = p2;
+            s.minX = p1.x < p2.x ? p1.x : p2.x;
+            s.minY = p1.y < p2.y ? p1.y : p2.y;
+            s.maxX = p1.x > p2.x ? p1.x : p2.x;
+            s.maxY = p1.y > p2.y ? p1.y : p2.y;
+            s.PathId = pathId;
+            s.EdgeIdx = i;
+
+            segments[ptr] = s;
+            ptr++;
+        }
+    }
+
+    /// <summary>
     /// 递归构建函数 (In-Place Partitioning)
     /// 核心优化：直接在 segments 数组上进行交换排序，不使用任何临时 List
     /// </summary>
@@ -265,41 +315,34 @@ public struct NativeAABBTree : IDisposable
 
     /// <summary>
     /// 查询线段是否与树中任意线段相交 (O(log N))
+    /// Phase C-1: 全 float2 化，消灭 Segment.P1/P2 的反向 Vector2 装箱
     /// </summary>
-    public bool Intersects(Vector2 p1, Vector2 p2)
+    public bool Intersects(float2 p1, float2 p2)
     {
         if (nodesUsed == 0) return false;
         return IntersectsRecursive(0, p1, p2);
     }
 
-    private bool IntersectsRecursive(int nodeIdx, Vector2 p1, Vector2 p2)
+    private bool IntersectsRecursive(int nodeIdx, float2 p1, float2 p2)
     {
-        // 1. AABB 剔除 (Pruning)
         if (!nodes[nodeIdx].IntersectsBox(p1, p2)) return false;
 
-        // 2. 叶子节点处理
         if (nodes[nodeIdx].segmentCount > 0)
         {
             int start = nodes[nodeIdx].segmentStartIndex;
             int end = start + nodes[nodeIdx].segmentCount;
-            // 暴力遍历叶子内的几条边
             for (int i = start; i < end; i++)
             {
                 Segment s = segments[i];
-
-                // 排除共享顶点 (如果连接点本身就在墙上，不算撞墙)
-                if (IsSamePoint(new Vector2(s.P1.x, s.P1.y), p1) || IsSamePoint(new Vector2(s.P1.x, s.P1.y), p2) ||
-                    IsSamePoint(new Vector2(s.P2.x, s.P2.y), p1) || IsSamePoint(new Vector2(s.P2.x, s.P2.y), p2)) continue;
-
-                if (SegmentsIntersect(p1, p2, new Vector2(s.P1.x, s.P1.y), new Vector2(s.P2.x, s.P2.y))) return true;
+                if (IsSamePoint(s.P1, p1) || IsSamePoint(s.P1, p2) ||
+                    IsSamePoint(s.P2, p1) || IsSamePoint(s.P2, p2)) continue;
+                if (SegmentsIntersect(p1, p2, s.P1, s.P2)) return true;
             }
             return false;
         }
 
-        // 3. 递归查询
         if (IntersectsRecursive(nodes[nodeIdx].leftChildIndex, p1, p2)) return true;
         if (IntersectsRecursive(nodes[nodeIdx].rightChildIndex, p1, p2)) return true;
-
         return false;
     }
 
@@ -378,9 +421,8 @@ public struct NativeAABBTree : IDisposable
         if (node.rightChildIndex != -1) QueryOverlapBurstRecursive(node.rightChildIndex, sMinX, sMinY, sMaxX, sMaxY, ref results);
     }
 
-    // 增加容差到 1e-7f，处理 float 精度问题
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool IsSamePoint(Vector2 a, Vector2 b)
+    private static bool IsSamePoint(float2 a, float2 b)
     {
         float dx = a.x - b.x;
         float dy = a.y - b.y;
@@ -388,15 +430,12 @@ public struct NativeAABBTree : IDisposable
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool SegmentsIntersect(Vector2 a, Vector2 b, Vector2 c, Vector2 d)
+    private static bool SegmentsIntersect(float2 a, float2 b, float2 c, float2 d)
     {
         float den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
         if (den == 0) return false;
-
         float u = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / den;
         float v = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / den;
-
-        // 严格内部相交 (不包含端点)，防止误判邻边
         return (u > 1e-5f && u < 1f - 1e-5f && v > 1e-5f && v < 1f - 1e-5f);
     }
 

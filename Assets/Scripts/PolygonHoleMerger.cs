@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Burst;
+using Unity.Mathematics;
 
 /// <summary>
 /// 多边形空洞合并器 (Optimized Hole Merger)
@@ -12,14 +13,16 @@ using Unity.Burst;
 /// 1. 绕序规范化：强制外圈 CCW，孔洞 CW。
 /// 2. 静态树加速：使用 NativeAABBTree 将几何查询从 O(N) 降至 O(log N)。
 /// 3. NativeArray内存展平：将原本频繁装箱 GC 的双向链表，压平成数组内连续寻址的零开销模式。
+/// Phase C-1: 内部全面 float2 化，消灭 Vector2 装箱，为 MergeNative 通道做准备。
 /// </para>
 /// </summary>
 public class PolygonHoleMerger
 {
     // 双向链表节点 (NativeArray扁平版)，用于 O(1) 插入与查询
+    // Phase C-1: Position 从 Vector2 → float2，统一 Native 类型
     private struct NativeListNode
     {
-        public Vector2 Position;
+        public float2 Position;
         public int Next;
         public int Prev;
     }
@@ -34,14 +37,15 @@ public class PolygonHoleMerger
     }
 
     // 动态生成的"桥"记录
+    // Phase C-1: A/B 从 Vector2 → float2
     public struct BridgeSegment
     {
-        public Vector2 A;
-        public Vector2 B;
+        public float2 A;
+        public float2 B;
     }
 
     /// <summary>
-    /// 合并核心入口
+    /// 合并核心入口（托管路径，供 CustomPolygon/SliceableGenerator 等初始化场景使用）
     /// </summary>
     public static List<Vector2> Merge(List<Vector2> outRing, List<List<Vector2>> holes)
     {
@@ -110,14 +114,14 @@ public class PolygonHoleMerger
             // 5. 逐个合并
             foreach (var hole in holeDatas)
             {
-                Vector2 M = nodes[hole.MaxXNode].Position;
+                float2 M = nodes[hole.MaxXNode].Position;
 
                 // 寻找最佳连接点 P (O(N_outer * log N_total))
                 int bestP = FindBestBridgePoint(M, outerHead, ref nodes, staticWallTree, dynamicBridges, maxNodes);
 
                 if (bestP != -1)
                 {
-                    Vector2 P = nodes[bestP].Position;
+                    float2 P = nodes[bestP].Position;
                     // 记录新桥，防止后续的洞穿过这条线
                     dynamicBridges.Add(new BridgeSegment { A = M, B = P });
 
@@ -140,15 +144,106 @@ public class PolygonHoleMerger
         }
     }
 
+    /// <summary>
+    /// Phase C-1: Native 零拷贝合并入口 — 直接从 FlattenedLoops 切片读取，消灭全部中间 List<Vector2> 分配。
+    /// ClassifyLoopsJob 已保证 solid=CCW, hole=CW，无需 EnsureWinding。
+    /// </summary>
+    public static NativeList<float2> MergeNative(NativeArray<float2> flatLoops, int2 outerRange, List<int2> holeRanges, Allocator outputAllocator = Allocator.TempJob)
+    {
+        // 快捷通道：无孔洞时直接批量拷贝，跳过链表构建和 AABB 树（切割最常见场景）
+        if (holeRanges == null || holeRanges.Count == 0)
+        {
+            NativeList<float2> result = new NativeList<float2>(outerRange.y, outputAllocator);
+            var sub = flatLoops.GetSubArray(outerRange.x, outerRange.y);
+            result.AddRange(sub);
+            return result;
+        }
+
+        NativeAABBTree staticWallTree = new NativeAABBTree();
+        staticWallTree.Build(flatLoops, outerRange, holeRanges);
+
+        int totalNodes = outerRange.y;
+        for (int i = 0; i < holeRanges.Count; i++) totalNodes += holeRanges[i].y;
+        int maxNodes = totalNodes + holeRanges.Count * 2;
+
+        NativeArray<NativeListNode> nodes = new NativeArray<NativeListNode>(maxNodes, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
+        int nextFreeIndex = totalNodes;
+
+        try
+        {
+            int outerHead = CreateLoopFromNative(flatLoops, outerRange.x, outerRange.y, ref nodes, 0);
+
+            List<HoleData> holeDatas = new List<HoleData>(holeRanges.Count);
+            int currentOffset = outerRange.y;
+            for (int i = 0; i < holeRanges.Count; i++)
+            {
+                int2 hr = holeRanges[i];
+                if (hr.y < 3) continue;
+
+                int head = CreateLoopFromNative(flatLoops, hr.x, hr.y, ref nodes, currentOffset);
+                currentOffset += hr.y;
+
+                int curr = head;
+                int maxNode = head;
+                float maxX = -float.MaxValue;
+                int count = 0;
+                int watchdog = 0;
+                int watchdogLimit = maxNodes * 2;
+                do
+                {
+                    if (nodes[curr].Position.x > maxX)
+                    {
+                        maxX = nodes[curr].Position.x;
+                        maxNode = curr;
+                    }
+                    curr = nodes[curr].Next;
+                    count++;
+                    watchdog++;
+                    if (watchdog > watchdogLimit) { Debug.LogError("[PolygonHoleMerger] MergeNative Init Watchdog."); break; }
+                } while (curr != head);
+
+                holeDatas.Add(new HoleData { Head = head, Count = count, MaxX = maxX, MaxXNode = maxNode });
+            }
+
+            holeDatas.Sort((a, b) => b.MaxX.CompareTo(a.MaxX));
+
+            List<BridgeSegment> dynamicBridges = new List<BridgeSegment>(holeRanges.Count);
+
+            foreach (var hole in holeDatas)
+            {
+                float2 M = nodes[hole.MaxXNode].Position;
+                int bestP = FindBestBridgePoint(M, outerHead, ref nodes, staticWallTree, dynamicBridges, maxNodes);
+
+                if (bestP != -1)
+                {
+                    float2 P = nodes[bestP].Position;
+                    dynamicBridges.Add(new BridgeSegment { A = M, B = P });
+                    StitchLists(bestP, hole.MaxXNode, ref nodes, ref nextFreeIndex);
+                }
+                else
+                {
+                    Debug.LogWarning($"[PolygonHoleMerger] MergeNative 无法为孔洞找到合法的桥! M点: {M}");
+                }
+            }
+
+            return FlattenListNative(outerHead, ref nodes, maxNodes, outputAllocator);
+        }
+        finally
+        {
+            if (nodes.IsCreated) nodes.Dispose();
+            staticWallTree.Dispose();
+        }
+    }
+
     private static int FindBestBridgePoint(
-        Vector2 M,
+        float2 M,
         int outerLoop,
         ref NativeArray<NativeListNode> nodes,
         NativeAABBTree tree,
         List<BridgeSegment> bridges,
         int limitNodesCount)
     {
-        NativeList<Vector2> candidates = new NativeList<Vector2>(limitNodesCount, Allocator.TempJob);
+        NativeList<float2> candidates = new NativeList<float2>(limitNodesCount, Allocator.TempJob);
         NativeList<int> candidateIndices = new NativeList<int>(limitNodesCount, Allocator.TempJob);
         
         try
@@ -219,8 +314,8 @@ public class PolygonHoleMerger
     }
 
     private static int FindBestBridgePointSequential(
-        Vector2 M,
-        NativeList<Vector2> candidates,
+        float2 M,
+        NativeList<float2> candidates,
         NativeList<int> candidateIndices,
         NativeAABBTree tree,
         List<BridgeSegment> bridges)
@@ -230,8 +325,9 @@ public class PolygonHoleMerger
 
         for (int i = 0; i < candidates.Length; i++)
         {
-            Vector2 P = candidates[i];
-            float distSq = (P - M).sqrMagnitude;
+            float2 P = candidates[i];
+            float dx = P.x - M.x; float dy = P.y - M.y;
+            float distSq = dx * dx + dy * dy;
 
             if (P.x <= M.x) distSq += 1000000f;
 
@@ -247,7 +343,7 @@ public class PolygonHoleMerger
         return bestNode;
     }
 
-    private static bool IsBridgeValid(Vector2 start, Vector2 end, NativeAABBTree tree, List<BridgeSegment> bridges)
+    private static bool IsBridgeValid(float2 start, float2 end, NativeAABBTree tree, List<BridgeSegment> bridges)
     {
         if (tree.Intersects(start, end)) return false;
 
@@ -314,6 +410,7 @@ public class PolygonHoleMerger
         if (isCCW != targetCCW) points.Reverse();
     }
 
+    // Phase C-1: I/O 边界转换 — Vector2 输入自动转为内部 float2 存储
     private static int CreateLoop(List<Vector2> points, ref NativeArray<NativeListNode> nodes, int startOffset)
     {
         if (points.Count == 0) return -1;
@@ -321,7 +418,7 @@ public class PolygonHoleMerger
         for (int i = 0; i < count; i++)
         {
             NativeListNode n = new NativeListNode();
-            n.Position = points[i];
+            n.Position = new float2(points[i].x, points[i].y);
             n.Prev = startOffset + (i - 1 + count) % count;
             n.Next = startOffset + (i + 1) % count;
             nodes[startOffset + i] = n;
@@ -329,6 +426,22 @@ public class PolygonHoleMerger
         return startOffset;
     }
 
+    // Phase C-1: Native 零拷贝链表构建 — 直接从 FlattenedLoops 读取 float2，无类型转换
+    private static int CreateLoopFromNative(NativeArray<float2> flatLoops, int start, int count, ref NativeArray<NativeListNode> nodes, int startOffset)
+    {
+        if (count == 0) return -1;
+        for (int i = 0; i < count; i++)
+        {
+            NativeListNode n = new NativeListNode();
+            n.Position = flatLoops[start + i];  // float2→float2 零转换
+            n.Prev = startOffset + (i - 1 + count) % count;
+            n.Next = startOffset + (i + 1) % count;
+            nodes[startOffset + i] = n;
+        }
+        return startOffset;
+    }
+
+    // Phase C-1: I/O 边界转换 — 内部 float2 存储还原为 Vector2 输出（仅用于托管路径）
     private static List<Vector2> FlattenList(int head, ref NativeArray<NativeListNode> nodes, int limitNodesCount)
     {
         List<Vector2> result = new List<Vector2>();
@@ -344,7 +457,8 @@ public class PolygonHoleMerger
                 Debug.LogError($"[PolygonHoleMerger] FlattenList OOB limits! Cursor={curr}");
                 break;
             }
-            result.Add(nodes[curr].Position);
+            float2 pos = nodes[curr].Position;
+            result.Add(new Vector2(pos.x, pos.y));
             curr = nodes[curr].Next;
             watchdog++;
             if (watchdog > watchdogLimit) 
@@ -357,14 +471,43 @@ public class PolygonHoleMerger
         return result;
     }
 
-    private static bool IsSamePoint(Vector2 a, Vector2 b)
+    // Phase C-1: Native 零拷贝链表展平 — 输出 NativeList<float2>，供 Triangulator 直接消费
+    private static NativeList<float2> FlattenListNative(int head, ref NativeArray<NativeListNode> nodes, int limitNodesCount, Allocator allocator)
+    {
+        NativeList<float2> result = new NativeList<float2>(limitNodesCount, allocator);
+        if (head == -1) return result;
+
+        int curr = head;
+        int watchdog = 0;
+        int watchdogLimit = limitNodesCount * 2;
+        do
+        {
+            if (curr < 0 || curr >= nodes.Length)
+            {
+                Debug.LogError($"[PolygonHoleMerger] FlattenListNative OOB! Cursor={curr}");
+                break;
+            }
+            result.Add(nodes[curr].Position);  // float2→float2 零转换
+            curr = nodes[curr].Next;
+            watchdog++;
+            if (watchdog > watchdogLimit)
+            {
+                Debug.LogError("[PolygonHoleMerger] FlattenListNative Watchdog 死循环保护触发！");
+                break;
+            }
+        } while (curr != head);
+
+        return result;
+    }
+
+    private static bool IsSamePoint(float2 a, float2 b)
     {
         float dx = a.x - b.x;
         float dy = a.y - b.y;
         return (dx * dx + dy * dy) < 1e-7f;
     }
 
-    private static bool SegmentsIntersect(Vector2 a, Vector2 b, Vector2 c, Vector2 d)
+    private static bool SegmentsIntersect(float2 a, float2 b, float2 c, float2 d)
     {
         float den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
         if (den == 0) return false;
@@ -376,8 +519,8 @@ public class PolygonHoleMerger
     [BurstCompile(CompileSynchronously = true, FloatMode = FloatMode.Fast)]
     public struct BridgeScanJob : IJobParallelFor
     {
-        public Vector2 M;
-        [ReadOnly] public NativeArray<Vector2> Points;
+        public float2 M;
+        [ReadOnly] public NativeArray<float2> Points;
         [ReadOnly] public NativeAABBTree Tree;
         [ReadOnly] public NativeArray<BridgeSegment> Bridges;
 
@@ -385,8 +528,9 @@ public class PolygonHoleMerger
 
         public void Execute(int index)
         {
-            Vector2 P = Points[index];
-            float distSq = (P - M).sqrMagnitude;
+            float2 P = Points[index];
+            float dx = P.x - M.x; float dy = P.y - M.y;
+            float distSq = dx * dx + dy * dy;
 
             if (P.x <= M.x) distSq += 1000000f; 
 
@@ -416,14 +560,14 @@ public class PolygonHoleMerger
             OutputDistances[index] = distSq;
         }
 
-        private static bool IsSamePoint(Vector2 a, Vector2 b)
+        private static bool IsSamePoint(float2 a, float2 b)
         {
             float dx = a.x - b.x;
             float dy = a.y - b.y;
             return (dx * dx + dy * dy) < 1e-7f;
         }
 
-        private static bool SegmentsIntersect(Vector2 a, Vector2 b, Vector2 c, Vector2 d)
+        private static bool SegmentsIntersect(float2 a, float2 b, float2 c, float2 d)
         {
             float den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
             if (den == 0) return false;

@@ -142,33 +142,28 @@ public static partial class SlicerCore
         return assignHandle;
     }
 
+    /// <summary>
+    /// Phase C-1: 仅记录 Native 范围索引，不构建 List&lt;Vector2&gt;，消灭 float2→Vector2 装箱 GC。
+    /// CreateSlicedObject 将通过 MergeNative 直接从 FlattenedLoops 读取数据。
+    /// </summary>
     public static List<PolygonData> ResolveCutResult(SliceContext sys)
     {
         List<PolygonData> solids = new List<PolygonData>();
         int loopCount = sys.LoopRanges.Length;
 
-        // 临时索引表：loopIndex → PolygonData（仅 solid 有值）
         PolygonData[] solidMap = new PolygonData[loopCount];
 
-        var flatLoops = sys.FlattenedLoops.AsArray();
-
-        // 第一遍：构建所有 solid 的 PolygonData
+        // 第一遍：构建 solid 的 PolygonData（仅元数据 + Native 范围，跳过 List<Vector2> 构建）
         for (int i = 0; i < loopCount; i++)
         {
             if (sys.LoopTypes[i] != 1) continue;
 
             int2 range = sys.LoopRanges[i];
-            List<Vector2> loop = sys.GetList();
-            for (int k = 0; k < range.y; k++)
-            {
-                float2 v = flatLoops[range.x + k];
-                loop.Add(new Vector2(v.x, v.y));
-            }
 
             PolygonData poly = sys.GetPoly();
-            poly.OuterLoop = loop;
+            poly.OuterLoop = null;  // Native 路径不构建托管列表
             poly.Area = sys.LoopAreas[i];
-            poly.NativeOuterRange = range; // 记录 Native 范围索引
+            poly.NativeOuterRange = range;
             float4 b = sys.LoopBounds[i];
             poly.Bounds = new Bounds(
                 new Vector3((b.x + b.z) * 0.5f, (b.y + b.w) * 0.5f, 0),
@@ -179,7 +174,7 @@ public static partial class SlicerCore
             solids.Add(poly);
         }
 
-        // 第二遍：直接读取 AssignHolesJob 的预计算归属，将孔洞挂载到父级 solid
+        // 第二遍：仅记录孔洞 Native 范围索引到父级 solid（跳过 List<Vector2> 构建）
         for (int i = 0; i < loopCount; i++)
         {
             if (sys.LoopTypes[i] != -1) continue;
@@ -191,15 +186,7 @@ public static partial class SlicerCore
             if (parentIdx < 0 || parentIdx >= loopCount || solidMap[parentIdx] == null)
                 continue;
 
-            List<Vector2> hole = sys.GetList();
-            for (int k = 0; k < range.y; k++)
-            {
-                float2 v = flatLoops[range.x + k];
-                hole.Add(new Vector2(v.x, v.y));
-            }
-
-            solidMap[parentIdx].Holes.Add(hole);
-            solidMap[parentIdx].NativeHoleRanges.Add(range); // 记录孔洞 Native 范围
+            solidMap[parentIdx].NativeHoleRanges.Add(range);
         }
 
         return solids;

@@ -1,5 +1,7 @@
 using UnityEngine;
 using System.Collections.Generic;
+using Unity.Collections;
+using Unity.Mathematics;
 
 public static class Slicer
 {
@@ -83,6 +85,7 @@ public static class Slicer
         }
         return new Rect(minX, minY, maxX - minX, maxY - minY);
     }
+
     internal static void CreateSlicedObject(SlicerCore.PolygonData data, GameObject originalTemplate, Material mat, Rigidbody2D originalRb, Rect uvRefRect, SliceContext nativeCtx = null)
     {
         string baseName = originalTemplate.name.Replace("_Piece", "");
@@ -92,71 +95,149 @@ public static class Slicer
         newObj.layer = originalTemplate.layer;
         newObj.tag = originalTemplate.tag;
 
-        List<Vector2> mergedVertices = PolygonHoleMerger.Merge(data.OuterLoop, data.Holes);
+        // Phase C-1: 判断走 Native 零拷贝路径还是旧托管路径
+        bool useNativePath = nativeCtx != null && data.NativeOuterRange.y > 0;
 
-        Vector3[] vertices3D = new Vector3[mergedVertices.Count];
-        Vector2[] uvs = new Vector2[mergedVertices.Count];
-        Vector2[] vertices2D = mergedVertices.ToArray(); // Triangulator 需要数组
+        int vertCount;
+        Vector3[] vertices3D;
+        Vector2[] uvs;
+        Vector2[] vertices2D;
+        NativeList<float2> mergedNative = default;
 
         float width = uvRefRect.width < 0.0001f ? 1 : uvRefRect.width;
         float height = uvRefRect.height < 0.0001f ? 1 : uvRefRect.height;
-        float minX = uvRefRect.x;
-        float minY = uvRefRect.y;
+        float uMin = uvRefRect.x;
+        float vMin = uvRefRect.y;
 
-        for (int i = 0; i < mergedVertices.Count; i++)
+        NativeArray<float2> flatLoops = default;
+
+        try
         {
-            vertices3D[i] = mergedVertices[i];
-            float u = (mergedVertices[i].x - minX) / width;
-            float v = (mergedVertices[i].y - minY) / height;
-            uvs[i] = new Vector2(u, v);
+            if (useNativePath)
+            {
+                // ★ Native 零拷贝路径：从 FlattenedLoops 直接读取，不经过 List<Vector2>
+                flatLoops = nativeCtx.FlattenedLoops.AsArray();
+                mergedNative = PolygonHoleMerger.MergeNative(flatLoops, data.NativeOuterRange, data.NativeHoleRanges);
+
+                vertCount = mergedNative.Length;
+                vertices3D = new Vector3[vertCount];
+                uvs = new Vector2[vertCount];
+                vertices2D = new Vector2[vertCount];
+
+                for (int i = 0; i < vertCount; i++)
+                {
+                    float2 v = mergedNative[i];
+                    vertices3D[i] = new Vector3(v.x, v.y, 0);
+                    vertices2D[i] = new Vector2(v.x, v.y);
+                    uvs[i] = new Vector2((v.x - uMin) / width, (v.y - vMin) / height);
+                }
+            }
+            else
+            {
+                // ★ 旧托管路径回退（CurveSlicer.PerformHolePunch 等无 nativeCtx 的调用）
+                List<Vector2> mergedVertices = PolygonHoleMerger.Merge(data.OuterLoop, data.Holes);
+
+                vertCount = mergedVertices.Count;
+                vertices3D = new Vector3[vertCount];
+                uvs = new Vector2[vertCount];
+                vertices2D = mergedVertices.ToArray();
+
+                for (int i = 0; i < vertCount; i++)
+                {
+                    vertices3D[i] = mergedVertices[i];
+                    uvs[i] = new Vector2((mergedVertices[i].x - uMin) / width, (mergedVertices[i].y - vMin) / height);
+                }
+            }
+
+            int[] indices = Triangulator.Triangulate(vertices2D);
+
+            Mesh mesh = new Mesh();
+            mesh.vertices = vertices3D;
+            mesh.uv = uvs;
+            mesh.triangles = indices;
+            // 2D 场景法线恒定为 (0,0,-1)，硬编码跳过 RecalculateNormals 的全 mesh 叉积遍历
+            Vector3[] normals = new Vector3[vertices3D.Length];
+            for (int i = 0; i < normals.Length; i++) normals[i] = new Vector3(0, 0, -1);
+            mesh.normals = normals;
+            mesh.RecalculateBounds();
+
+            MeshFilter mf = newObj.AddComponent<MeshFilter>();
+            mf.mesh = mesh;
+            MeshRenderer mr = newObj.AddComponent<MeshRenderer>();
+            mr.material = mat;
+
+            // --- 碰撞体设置 ---
+            PolygonCollider2D pc = newObj.AddComponent<PolygonCollider2D>();
+            pc.enabled = false; // 延迟物理重建：批量设完后再启用
+
+            if (useNativePath)
+            {
+                // Native 路径：使用单个池化列表复用给所有 SetPath，零稳态 GC
+                int holeCount = data.NativeHoleRanges != null ? data.NativeHoleRanges.Count : 0;
+                pc.pathCount = 1 + holeCount;
+
+                List<Vector2> tempPathList = nativeCtx.GetList();
+
+                FillListFromNativeRange(tempPathList, flatLoops, data.NativeOuterRange);
+                pc.SetPath(0, tempPathList);
+
+                for (int i = 0; i < holeCount; i++)
+                {
+                    FillListFromNativeRange(tempPathList, flatLoops, data.NativeHoleRanges[i]);
+                    pc.SetPath(i + 1, tempPathList);
+                }
+
+                nativeCtx.ReturnList(tempPathList);
+            }
+            else
+            {
+                // 旧路径
+                pc.pathCount = 1 + data.Holes.Count;
+                pc.SetPath(0, data.OuterLoop);
+                for (int i = 0; i < data.Holes.Count; i++)
+                {
+                    pc.SetPath(i + 1, data.Holes[i]);
+                }
+            }
+
+            pc.enabled = true; // 统一触发一次物理重建
+
+            SliceableGenerator newGen = newObj.AddComponent<SliceableGenerator>();
+            newGen.hasUVReference = true;
+            newGen.uvReferenceRect = uvRefRect;
+            newGen.autoGenerateOnStart = false;
+
+            if (originalRb != null)
+            {
+                Rigidbody2D newRb = newObj.AddComponent<Rigidbody2D>();
+                newRb.mass = originalRb.mass * (data.Area / 10f);
+                newRb.useAutoMass = true;
+                newRb.linearDamping = originalRb.linearDamping;
+                newRb.angularDamping = originalRb.angularDamping;
+                newRb.gravityScale = originalRb.gravityScale;
+                newRb.collisionDetectionMode = originalRb.collisionDetectionMode;
+                newRb.interpolation = originalRb.interpolation;
+                newRb.sharedMaterial = originalRb.sharedMaterial;
+                newRb.linearVelocity = originalRb.linearVelocity;
+                newRb.angularVelocity = originalRb.angularVelocity;
+            }
         }
-
-        int[] indices = Triangulator.Triangulate(vertices2D);
-
-        Mesh mesh = new Mesh();
-        mesh.vertices = vertices3D;
-        mesh.uv = uvs;
-        mesh.triangles = indices;
-        // 2D 场景法线恒定为 (0,0,-1)，硬编码跳过 RecalculateNormals 的全 mesh 叉积遍历
-        Vector3[] normals = new Vector3[vertices3D.Length];
-        for (int i = 0; i < normals.Length; i++) normals[i] = new Vector3(0, 0, -1);
-        mesh.normals = normals;
-        mesh.RecalculateBounds();
-
-        MeshFilter mf = newObj.AddComponent<MeshFilter>();
-        mf.mesh = mesh;
-        MeshRenderer mr = newObj.AddComponent<MeshRenderer>();
-        mr.material = mat;
-
-        // --- 碰撞体设置：使用 List<Vector2> 重载避免 ToArray() 的 GC ---
-        PolygonCollider2D pc = newObj.AddComponent<PolygonCollider2D>();
-        pc.enabled = false; // 延迟物理重建：批量设完后再启用，避免每次 SetPath 触发凸分解
-        pc.pathCount = 1 + data.Holes.Count;
-        pc.SetPath(0, data.OuterLoop);  // List<Vector2> 重载，零拷贝
-        for (int i = 0; i < data.Holes.Count; i++)
+        finally
         {
-            pc.SetPath(i + 1, data.Holes[i]);
+            if (mergedNative.IsCreated) mergedNative.Dispose();
         }
-        pc.enabled = true; // 统一触发一次物理重建
+    }
 
-        SliceableGenerator newGen = newObj.AddComponent<SliceableGenerator>();
-        newGen.hasUVReference = true;
-        newGen.uvReferenceRect = uvRefRect;
-        newGen.autoGenerateOnStart = false;
-
-        if (originalRb != null)
+    /// <summary>
+    /// 从 FlattenedLoops 的范围切片填充池化 List（仅用于 PolygonCollider2D.SetPath）
+    /// </summary>
+    private static void FillListFromNativeRange(List<Vector2> list, NativeArray<float2> flatLoops, int2 range)
+    {
+        list.Clear();
+        for (int i = 0; i < range.y; i++)
         {
-            Rigidbody2D newRb = newObj.AddComponent<Rigidbody2D>();
-            newRb.mass = originalRb.mass * (data.Area / 10f);
-            newRb.useAutoMass = true;
-            newRb.linearDamping = originalRb.linearDamping;
-            newRb.angularDamping = originalRb.angularDamping;
-            newRb.gravityScale = originalRb.gravityScale;
-            newRb.collisionDetectionMode = originalRb.collisionDetectionMode;
-            newRb.interpolation = originalRb.interpolation;
-            newRb.sharedMaterial = originalRb.sharedMaterial;
-            newRb.linearVelocity = originalRb.linearVelocity;
-            newRb.angularVelocity = originalRb.angularVelocity;
+            float2 v = flatLoops[range.x + i];
+            list.Add(new Vector2(v.x, v.y));
         }
     }
 }
