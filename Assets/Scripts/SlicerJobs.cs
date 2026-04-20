@@ -80,8 +80,10 @@ public static partial class SlicerCore
             float dist1 = math.dot(normal, p1 - SliceStart);
             float dist2 = math.dot(normal, p2 - SliceStart);
 
-            int sign1 = dist1 > 0f ? 1 : -1;
-            int sign2 = dist2 > 0f ? 1 : -1;
+            // Fix: >= 保证 dist==0（顶点恰在切割线上）一致归入正侧，
+            // 防止浮点抖动导致相邻边对同一顶点的符号不一致
+            int sign1 = dist1 >= 0f ? 1 : -1;
+            int sign2 = dist2 >= 0f ? 1 : -1;
 
             if (sign1 != sign2)
             {
@@ -125,7 +127,7 @@ public static partial class SlicerCore
             for (int i = 0; i < pCount; i++)
             {
                 float2 currentVert = PathVerts[offset + i];
-                if (newPathVertices.Length == 0 || SqrDist(newPathVertices[newPathVertices.Length - 1], currentVert) > 0.0001f)
+                if (newPathVertices.Length == 0 || SqrDist(newPathVertices[newPathVertices.Length - 1], currentVert) > 1e-7f)
                 {
                     newPathVertices.Add(currentVert);
                 }
@@ -133,7 +135,9 @@ public static partial class SlicerCore
                 while (hitIndex < tempHits.Length && tempHits[hitIndex].SegmentIndex == i)
                 {
                     float2 p = tempHits[hitIndex].Point;
-                    if (SqrDist(newPathVertices[newPathVertices.Length - 1], p) <= 0.0001f)
+                    // ★ 关键修复：阈值从 0.0001f(距离0.01) 降至 1e-8f(距离0.0001)
+                    // 防止高密度网格上相邻边的交点被snap到同一顶点→缝合边塌缩→切割失败
+                    if (SqrDist(newPathVertices[newPathVertices.Length - 1], p) <= 1e-8f)
                     {
                         CutHitStreamWriter.Write(newPathVertices[newPathVertices.Length - 1]);
                     }
@@ -146,7 +150,7 @@ public static partial class SlicerCore
                 }
             }
 
-            if (newPathVertices.Length > 1 && SqrDist(newPathVertices[0], newPathVertices[newPathVertices.Length - 1]) < 0.0001f)
+            if (newPathVertices.Length > 1 && SqrDist(newPathVertices[0], newPathVertices[newPathVertices.Length - 1]) < 1e-7f)
             {
                 newPathVertices.Length = newPathVertices.Length - 1; 
             }
@@ -155,7 +159,7 @@ public static partial class SlicerCore
             {
                 float2 u = newPathVertices[i];
                 float2 v = newPathVertices[(i + 1) % newPathVertices.Length];
-                if (SqrDist(u, v) > 0.0001f)
+                if (SqrDist(u, v) > 1e-7f)
                 {
                     EdgeStreamWriter.Write(u);
                     EdgeStreamWriter.Write(v);
@@ -214,7 +218,9 @@ public static partial class SlicerCore
                 float2 pA = cutIntersections[i];
                 float2 pB = cutIntersections[i + 1];
                 float dx = pA.x - pB.x; float dy = pA.y - pB.y;
-                if (dx * dx + dy * dy > 0.0001f)
+                // ★ 关键修复：阈值从 0.0001f(距离0.01) 降至 1e-8f(距离0.0001)
+                // 防止浅角切割产生的短缝合边被丢弃→图拓扑无切割连接→物体不分裂
+                if (dx * dx + dy * dy > 1e-8f)
                 {
                     RawEdges.Add(pA);
                     RawEdges.Add(pB);

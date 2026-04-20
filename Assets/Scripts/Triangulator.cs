@@ -13,6 +13,7 @@ using Unity.Mathematics;
 /// 1. 废除托管引用对象 (`VertexNode` class)，整体被替换为 `NativeArray` 的无锁双端指针寻址。
 /// 2. 原生桶排序栅格 (`NativeUniformGrid`)，在内存连贯性状下提升寻值命中率 100%。
 /// 3. 全局采用 `EarClipJob.Run()` 实现主线程单频 Burst 暴走。无分配调度税。
+/// Phase C-2: 内部 float2 统一化，新增 TriangulateNative 零拷贝入口。
 /// </para>
 /// </summary>
 public static class Triangulator
@@ -21,9 +22,10 @@ public static class Triangulator
     //                                  底层无锁内存结构
     // =================================================================================
 
+    // Phase C-2: Position 从 Vector2 → float2
     private struct NativeVertexNode
     {
-        public Vector2 Position;
+        public float2 Position;
         public int Index;        // 原始索引
 
         public int Prev;         // 指向 NativeArray 的伪指针
@@ -52,7 +54,7 @@ public static class Triangulator
 
             for (int i = 0; i < count; i++)
             {
-                Vector2 p = nodes[reflexNodes[i]].Position;
+                float2 p = nodes[reflexNodes[i]].Position;
                 if (p.x < minX) minX = p.x;
                 if (p.x > maxX) maxX = p.x;
                 if (p.y < minY) minY = p.y;
@@ -105,7 +107,7 @@ public static class Triangulator
         public void Remove(int nodeIdx, ref NativeArray<NativeVertexNode> nodes)
         {
             if (!Cells.IsCreated) return;
-            Vector2 pos = nodes[nodeIdx].Position;
+            float2 pos = nodes[nodeIdx].Position;
             int idx = GetCellIndex(pos);
             if (idx < 0 || idx >= Cells.Length) return;
 
@@ -130,8 +132,9 @@ public static class Triangulator
             }
         }
 
+        // Phase C-2: float2 参数
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public int GetCellIndex(Vector2 pos)
+        public int GetCellIndex(float2 pos)
         {
             int x = (int)((pos.x - MinX) * InvCellSize);
             int y = (int)((pos.y - MinY) * InvCellSize);
@@ -151,10 +154,11 @@ public static class Triangulator
     //                                  Job 并发加速核心
     // =================================================================================
 
+    // Phase C-2: Vertices 从 NativeArray<Vector2> → NativeArray<float2>
     [BurstCompile(FloatMode = FloatMode.Fast)]
     private struct EarClipJob : IJob
     {
-        [ReadOnly] public NativeArray<Vector2> Vertices;
+        [ReadOnly] public NativeArray<float2> Vertices;
         public NativeList<int> Triangles;
 
         public void Execute()
@@ -183,8 +187,8 @@ public static class Triangulator
             float area = 0;
             for (int i = 0; i < n; i++)
             {
-                Vector2 p1 = nodes[i].Position;
-                Vector2 p2 = nodes[nodes[i].Next].Position;
+                float2 p1 = nodes[i].Position;
+                float2 p2 = nodes[nodes[i].Next].Position;
                 area += (p2.x - p1.x) * (p2.y + p1.y);
             }
 
@@ -315,9 +319,9 @@ public static class Triangulator
         private bool IsReflex(int nodeIdx, ref NativeArray<NativeVertexNode> nodes)
         {
             NativeVertexNode v = nodes[nodeIdx];
-            Vector2 a = nodes[v.Prev].Position;
-            Vector2 b = v.Position;
-            Vector2 c = nodes[v.Next].Position;
+            float2 a = nodes[v.Prev].Position;
+            float2 b = v.Position;
+            float2 c = nodes[v.Next].Position;
             return ((b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)) <= 0;
         }
 
@@ -326,9 +330,9 @@ public static class Triangulator
             NativeVertexNode v = nodes[nodeIdx];
             if (v.IsReflex) return false;
 
-            Vector2 a = nodes[v.Prev].Position;
-            Vector2 b = v.Position;
-            Vector2 c = nodes[v.Next].Position;
+            float2 a = nodes[v.Prev].Position;
+            float2 b = v.Position;
+            float2 c = nodes[v.Next].Position;
 
             float minX = a.x; if (b.x < minX) minX = b.x; if (c.x < minX) minX = c.x;
             float maxX = a.x; if (b.x > maxX) maxX = b.x; if (c.x > maxX) maxX = c.x;
@@ -362,9 +366,10 @@ public static class Triangulator
                         }
 
                         // 鲁棒性防抖排除重合点
-                        float d2a = (node.Position - a).sqrMagnitude;
-                        float d2b = (node.Position - b).sqrMagnitude;
-                        float d2c = (node.Position - c).sqrMagnitude;
+                        // Phase C-2: 使用 math.distancesq 替代 .sqrMagnitude (Burst SIMD 友好)
+                        float d2a = math.distancesq(node.Position, a);
+                        float d2b = math.distancesq(node.Position, b);
+                        float d2c = math.distancesq(node.Position, c);
 
                         if (d2a < 1e-6f || d2b < 1e-6f || d2c < 1e-6f)
                         {
@@ -381,8 +386,9 @@ public static class Triangulator
             return true;
         }
 
+        // Phase C-2: float2 参数
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool IsPointInTriangle(Vector2 a, Vector2 b, Vector2 c, Vector2 p)
+        private bool IsPointInTriangle(float2 a, float2 b, float2 c, float2 p)
         {
             bool check1 = ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)) >= 0;
             bool check2 = ((c.x - b.x) * (p.y - b.y) - (c.y - b.y) * (p.x - b.x)) >= 0;
@@ -392,15 +398,42 @@ public static class Triangulator
     }
 
     /// <summary>
-    /// 三角网格构建主入口，已彻底对接 Burst 底层
+    /// Phase C-2: Native 零拷贝三角剖分入口 — 直接消费 MergeNative 的 NativeList&lt;float2&gt; 输出。
+    /// 调用者拥有返回的 NativeList 并负责 Dispose。
+    /// </summary>
+    public static NativeList<int> TriangulateNative(NativeList<float2> vertices, Allocator outputAllocator = Allocator.TempJob)
+    {
+        int n = vertices.Length;
+        NativeList<int> nativeTriangles = new NativeList<int>(math.max((n - 2) * 3, 0), outputAllocator);
+        if (n < 3) return nativeTriangles;
+
+        EarClipJob job = new EarClipJob
+        {
+            Vertices = vertices.AsArray(),
+            Triangles = nativeTriangles
+        };
+
+        // 零拷贝：输入 NativeList 直接 AsArray() 传入，无中间 NativeArray 分配
+        job.Run();
+        return nativeTriangles;
+    }
+
+    /// <summary>
+    /// 三角网格构建主入口（托管路径），已彻底对接 Burst 底层。
+    /// 保留供 CurveSlicer.PerformHolePunch 等无 Native 上下文的调用。
     /// </summary>
     public static int[] Triangulate(Vector2[] vertices)
     {
         int n = vertices.Length;
         if (n < 3) return new int[0];
 
-        // 绑定极速 Native 数据管道
-        NativeArray<Vector2> nativeVerts = new NativeArray<Vector2>(vertices, Allocator.TempJob);
+        // I/O 边界：Vector2[] → NativeArray<float2>（单次批量转换）
+        NativeArray<float2> nativeVerts = new NativeArray<float2>(n, Allocator.TempJob, NativeArrayOptions.UninitializedMemory);
+        for (int i = 0; i < n; i++)
+        {
+            nativeVerts[i] = new float2(vertices[i].x, vertices[i].y);
+        }
+
         NativeList<int> nativeTriangles = new NativeList<int>((n - 2) * 3, Allocator.TempJob);
 
         try

@@ -101,8 +101,8 @@ public static class Slicer
         int vertCount;
         Vector3[] vertices3D;
         Vector2[] uvs;
-        Vector2[] vertices2D;
         NativeList<float2> mergedNative = default;
+        NativeList<int> nativeIndices = default;
 
         float width = uvRefRect.width < 0.0001f ? 1 : uvRefRect.width;
         float height = uvRefRect.height < 0.0001f ? 1 : uvRefRect.height;
@@ -113,6 +113,8 @@ public static class Slicer
 
         try
         {
+            List<Vector2> mergedVertices = null; // 仅旧路径使用
+
             if (useNativePath)
             {
                 // ★ Native 零拷贝路径：从 FlattenedLoops 直接读取，不经过 List<Vector2>
@@ -122,25 +124,23 @@ public static class Slicer
                 vertCount = mergedNative.Length;
                 vertices3D = new Vector3[vertCount];
                 uvs = new Vector2[vertCount];
-                vertices2D = new Vector2[vertCount];
+                // Phase C-2: 不再分配 new Vector2[vertCount] — 直接走 TriangulateNative
 
                 for (int i = 0; i < vertCount; i++)
                 {
                     float2 v = mergedNative[i];
                     vertices3D[i] = new Vector3(v.x, v.y, 0);
-                    vertices2D[i] = new Vector2(v.x, v.y);
                     uvs[i] = new Vector2((v.x - uMin) / width, (v.y - vMin) / height);
                 }
             }
             else
             {
                 // ★ 旧托管路径回退（CurveSlicer.PerformHolePunch 等无 nativeCtx 的调用）
-                List<Vector2> mergedVertices = PolygonHoleMerger.Merge(data.OuterLoop, data.Holes);
+                mergedVertices = PolygonHoleMerger.Merge(data.OuterLoop, data.Holes);
 
                 vertCount = mergedVertices.Count;
                 vertices3D = new Vector3[vertCount];
                 uvs = new Vector2[vertCount];
-                vertices2D = mergedVertices.ToArray();
 
                 for (int i = 0; i < vertCount; i++)
                 {
@@ -149,7 +149,20 @@ public static class Slicer
                 }
             }
 
-            int[] indices = Triangulator.Triangulate(vertices2D);
+            // Phase C-2: 三角剖分分流
+            int[] indices;
+            if (useNativePath)
+            {
+                // ★ Native 路径：MergeNative 输出直通 TriangulateNative，零中间分配
+                nativeIndices = Triangulator.TriangulateNative(mergedNative);
+                indices = nativeIndices.AsArray().ToArray();
+            }
+            else
+            {
+                // 旧路径：仍需 Vector2[] 给 Triangulate
+                Vector2[] vertices2D = mergedVertices.ToArray();
+                indices = Triangulator.Triangulate(vertices2D);
+            }
 
             Mesh mesh = new Mesh();
             mesh.vertices = vertices3D;
@@ -225,6 +238,7 @@ public static class Slicer
         finally
         {
             if (mergedNative.IsCreated) mergedNative.Dispose();
+            if (nativeIndices.IsCreated) nativeIndices.Dispose();
         }
     }
 
