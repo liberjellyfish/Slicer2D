@@ -119,7 +119,8 @@ public static partial class SlicerCore
                 }
             }
 
-            if (tempHits.Length > 1) {
+            if (tempHits.Length > 1)
+            {
                 tempHits.Sort(new NativeIntersectionComparer { Vertices = PathVerts, Offset = offset });
             }
 
@@ -152,7 +153,7 @@ public static partial class SlicerCore
 
             if (newPathVertices.Length > 1 && SqrDist(newPathVertices[0], newPathVertices[newPathVertices.Length - 1]) < 1e-7f)
             {
-                newPathVertices.Length = newPathVertices.Length - 1; 
+                newPathVertices.Length = newPathVertices.Length - 1;
             }
 
             for (int i = 0; i < newPathVertices.Length; i++)
@@ -192,19 +193,21 @@ public static partial class SlicerCore
             for (int i = 0; i < PathCount; i++)
             {
                 int edgeCount = EdgeStreamReader.BeginForEachIndex(i);
-                for (int e = 0; e < edgeCount; e++) {
+                for (int e = 0; e < edgeCount; e++)
+                {
                     RawEdges.Add(EdgeStreamReader.Read<float2>());
                 }
                 EdgeStreamReader.EndForEachIndex();
 
                 int cutCount = CutHitStreamReader.BeginForEachIndex(i);
-                for (int c = 0; c < cutCount; c++) {
+                for (int c = 0; c < cutCount; c++)
+                {
                     cutIntersections.Add(CutHitStreamReader.Read<float2>());
                 }
                 CutHitStreamReader.EndForEachIndex();
             }
 
-            if (cutIntersections.Length < 2) 
+            if (cutIntersections.Length < 2)
             {
                 cutIntersections.Dispose();
                 return;
@@ -240,11 +243,11 @@ public static partial class SlicerCore
     public struct NativeCurveIntersectionInfo
     {
         public float2 Point;
-        public float GlobalT;        
-        public int SegmentIndex;     
-        public float LocalTOnEdge;   
-        public int PathId;           
-        public bool IsEntry;         
+        public float GlobalT;
+        public int SegmentIndex;
+        public float LocalTOnEdge;
+        public int PathId;
+        public bool IsEntry;
     }
 
     // 针对每个 Path 局部重排 (防 S 型曲线重叠灾难)
@@ -278,17 +281,17 @@ public static partial class SlicerCore
         public NativeStream.Writer EdgeStreamWriter;
         public NativeStream.Writer CutHitStreamWriter;
 
-        private float SqrDist(float2 a, float2 b) { float dx=a.x-b.x; float dy=a.y-b.y; return dx*dx+dy*dy; }
+        private float SqrDist(float2 a, float2 b) { float dx = a.x - b.x; float dy = a.y - b.y; return dx * dx + dy * dy; }
 
         private bool SegmentIntersect(float2 a, float2 b, float2 c, float2 d, out float2 intersection, out float tEdge, out float tCut)
         {
             intersection = float2.zero; tEdge = 0; tCut = 0;
             float den = (b.x - a.x) * (d.y - c.y) - (b.y - a.y) * (d.x - c.x);
             if (den == 0f) return false;
-            
+
             tEdge = ((c.x - a.x) * (d.y - c.y) - (c.y - a.y) * (d.x - c.x)) / den;
             tCut = ((c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x)) / den;
-            
+
             if (tEdge >= -1e-5f && tEdge <= 1f + 1e-5f && tCut >= -1e-5f && tCut <= 1f + 1e-5f)
             {
                 intersection = a + tEdge * (b - a);
@@ -336,7 +339,8 @@ public static partial class SlicerCore
                         float crossVal = edir.x * cdir.y - edir.y * cdir.x;
                         bool isEntry = crossVal > 0;
 
-                        localHits.Add(new NativeCurveIntersectionInfo {
+                        localHits.Add(new NativeCurveIntersectionInfo
+                        {
                             Point = hitPoint,
                             GlobalT = cutIdx + tCut,
                             SegmentIndex = i,
@@ -349,7 +353,8 @@ public static partial class SlicerCore
             }
 
             // 局部排序对抗 S 型曲线切割交叉
-            if (localHits.Length > 1) {
+            if (localHits.Length > 1)
+            {
                 localHits.Sort(new NativeCurveIntersectionComparer());
             }
 
@@ -369,8 +374,12 @@ public static partial class SlicerCore
                     float2 p = localHits[hitIndex].Point;
                     if (SqrDist(newPathVertices[newPathVertices.Length - 1], p) <= 0.0001f)
                     {
-                        // 极近点不作为物理端点更新拓扑路径，但保留交点实体身份抛向 CutHitStreamWriter
-                        CutHitStreamWriter.Write(localHits[hitIndex]);
+                        // 取出结构体副本
+                        var snappedHit = localHits[hitIndex];
+                        // 强制覆盖交点坐标为吸附后的多边形顶点坐标
+                        snappedHit.Point = newPathVertices[newPathVertices.Length - 1];
+                        // 写入修正后的数据
+                        CutHitStreamWriter.Write(snappedHit);
                     }
                     else
                     {
@@ -383,7 +392,7 @@ public static partial class SlicerCore
 
             if (newPathVertices.Length > 1 && SqrDist(newPathVertices[0], newPathVertices[newPathVertices.Length - 1]) < 0.0001f)
             {
-                newPathVertices.Length = newPathVertices.Length - 1; 
+                newPathVertices.Length = newPathVertices.Length - 1;
             }
 
             for (int i = 0; i < newPathVertices.Length; i++)
@@ -416,7 +425,7 @@ public static partial class SlicerCore
 
         public NativeList<float2> RawEdges;
 
-        private float SqrDist(float2 a, float2 b) { float dx=a.x-b.x; float dy=a.y-b.y; return dx*dx+dy*dy; }
+        private float SqrDist(float2 a, float2 b) { float dx = a.x - b.x; float dy = a.y - b.y; return dx * dx + dy * dy; }
 
         public void Execute()
         {
@@ -425,19 +434,21 @@ public static partial class SlicerCore
             for (int i = 0; i < PathCount; i++)
             {
                 int edgeCount = EdgeStreamReader.BeginForEachIndex(i);
-                for (int e = 0; e < edgeCount; e++) {
+                for (int e = 0; e < edgeCount; e++)
+                {
                     RawEdges.Add(EdgeStreamReader.Read<float2>());
                 }
                 EdgeStreamReader.EndForEachIndex();
 
                 int cutCount = CutHitStreamReader.BeginForEachIndex(i);
-                for (int c = 0; c < cutCount; c++) {
+                for (int c = 0; c < cutCount; c++)
+                {
                     allHits.Add(CutHitStreamReader.Read<NativeCurveIntersectionInfo>());
                 }
                 CutHitStreamReader.EndForEachIndex();
             }
 
-            if (allHits.Length < 2) 
+            if (allHits.Length < 2)
             {
                 allHits.Dispose();
                 return;
@@ -448,14 +459,14 @@ public static partial class SlicerCore
             // Grazing(边缘极点波掠) 与顶点穿透的极终防错机制：按物理空间进行聚类合并！
             // 彻底根除因为截面浮点精度导致的幻象交点分离和同一顶点的出入奇偶性翻转（导致原本凹口生成实体块的恶性Bug）
             NativeList<NativeCurveIntersectionInfo> validHits = new NativeList<NativeCurveIntersectionInfo>(allHits.Length, Allocator.Temp);
-            
+
             int c_idx = 0;
             while (c_idx < allHits.Length)
             {
                 var baseHit = allHits[c_idx];
                 bool hasEntry = baseHit.IsEntry;
                 bool hasExit = !baseHit.IsEntry;
-                
+
                 int next_idx = c_idx + 1;
                 while (next_idx < allHits.Length)
                 {
@@ -472,7 +483,7 @@ public static partial class SlicerCore
                         break;
                     }
                 }
-                
+
                 if (hasEntry && hasExit)
                 {
                     // 存在一进一出，证明是经过边缘的波掠 (Graze) 或是穿透了非流形触点 -> 宏观净贡献为 0，互抵消失！
@@ -483,7 +494,7 @@ public static partial class SlicerCore
                     baseHit.IsEntry = hasEntry; // 确保属性映射正确
                     validHits.Add(baseHit);
                 }
-                
+
                 c_idx = next_idx;
             }
 
@@ -495,7 +506,7 @@ public static partial class SlicerCore
                 if (validHits[i].IsEntry)
                 {
                     depth++;
-                    if (depth == 1) entryHitIdx = i; 
+                    if (depth == 1) entryHitIdx = i;
                 }
                 else
                 {
@@ -587,34 +598,43 @@ public static partial class SlicerCore
             if (N == 0) return;
 
             NativeArray<PointWithIndex> sorted = new NativeArray<PointWithIndex>(N, Allocator.Temp);
-            for (int i = 0; i < N; i++) {
+            for (int i = 0; i < N; i++)
+            {
                 sorted[i] = new PointWithIndex { P = RawEdges[i], OrigIndex = i };
             }
-            
+
             sorted.Sort();
 
             int currentUniqueId = 0;
-            
+
             for (int i = 0; i < N; i++)
             {
-                if (i == 0) {
+                if (i == 0)
+                {
                     UniqueVertices.Add(sorted[i].P);
                     AliasMap[sorted[i].OrigIndex] = currentUniqueId;
-                } else {
+                }
+                else
+                {
                     int matchedId = -1;
                     // 一维 Sweep-line 向后扫掠，剔除超限者
-                    for (int j = i - 1; j >= 0; j--) {
+                    for (int j = i - 1; j >= 0; j--)
+                    {
                         if (sorted[i].P.x - sorted[j].P.x > ToleranceX) break; // 超过 X 容差中断，缓存高命中
 
-                        if (math.distancesq(sorted[i].P, sorted[j].P) < ToleranceSq) {
+                        if (math.distancesq(sorted[i].P, sorted[j].P) < ToleranceSq)
+                        {
                             matchedId = AliasMap[sorted[j].OrigIndex];
                             break;
                         }
                     }
 
-                    if (matchedId != -1) {
+                    if (matchedId != -1)
+                    {
                         AliasMap[sorted[i].OrigIndex] = matchedId;
-                    } else {
+                    }
+                    else
+                    {
                         currentUniqueId++;
                         UniqueVertices.Add(sorted[i].P);
                         AliasMap[sorted[i].OrigIndex] = currentUniqueId;
@@ -659,7 +679,7 @@ public static partial class SlicerCore
     {
         [ReadOnly] public NativeParallelMultiHashMap<int, int> Graph;
         [ReadOnly] public NativeList<float2> UniqueVertices;
-        
+
         public NativeList<float2> FlattenedLoops;
         public NativeList<int2> LoopRanges;
 
@@ -671,7 +691,7 @@ public static partial class SlicerCore
             for (int k = 0; k < keysCount; k++)
             {
                 int startNode = keys[k];
-                
+
                 if (Graph.TryGetFirstValue(startNode, out int nextNodeInitial, out var iterInitial))
                 {
                     do
@@ -704,7 +724,7 @@ public static partial class SlicerCore
                             curr = next;
 
                             next = GetLeftMostNeighbor(prev, curr);
-                            if (next == -1) break; 
+                            if (next == -1) break;
                         }
 
                         int count = FlattenedLoops.Length - startIndex;
@@ -722,7 +742,7 @@ public static partial class SlicerCore
                     } while (Graph.TryGetNextValue(out nextNodeInitial, ref iterInitial));
                 }
             }
-            
+
             visitedEdges.Dispose();
             keys.Dispose();
         }
@@ -731,17 +751,18 @@ public static partial class SlicerCore
         {
             float2 prevP = UniqueVertices[prev];
             float2 currP = UniqueVertices[curr];
-            
+
             float2 inDir = currP - prevP;
             float lenSq = inDir.x * inDir.x + inDir.y * inDir.y;
-            if (lenSq < 1e-10f) inDir = new float2(1, 0); 
-            
+            if (lenSq < 1e-10f) inDir = new float2(1, 0);
+
             FixedList64Bytes<int> neighbors = new FixedList64Bytes<int>();
             int degree = Graph.CountValuesForKey(curr); // 循环外缓存度数，避免 O(D²)
             if (Graph.TryGetFirstValue(curr, out int n, out var it))
             {
-                do {
-                    if (n == prev && degree > 1) continue; 
+                do
+                {
+                    if (n == prev && degree > 1) continue;
                     if (neighbors.Length < 15) neighbors.Add(n);
                 } while (Graph.TryGetNextValue(out n, ref it));
             }
@@ -755,9 +776,10 @@ public static partial class SlicerCore
                 int cand = neighbors[i];
                 float2 OutCand = UniqueVertices[cand] - currP;
                 float2 OutBest = UniqueVertices[bestNeighbor] - currP;
-                
+
                 int cmp = CompareLeftMost(OutBest, OutCand, inDir);
-                if (cmp < 0) { // Cand is more left than Best
+                if (cmp < 0)
+                { // Cand is more left than Best
                     bestNeighbor = cand;
                 }
             }
@@ -774,7 +796,7 @@ public static partial class SlicerCore
             if (catA == 0 || catA == 2) return 0;
 
             float cross = OutA.x * OutB.y - OutA.y * OutB.x;
-            
+
             if (cross > 1e-5f) return -1; // B is CCW over A (OutA < OutB)
             if (cross < -1e-5f) return 1; // A is CCW over B (OutA > OutB)
             return 0;
@@ -782,8 +804,8 @@ public static partial class SlicerCore
 
         private int GetCategory(float2 V, float2 inDir)
         {
-            float c = inDir.x * V.y - inDir.y * V.x; 
-            float d = inDir.x * V.x + inDir.y * V.y; 
+            float c = inDir.x * V.y - inDir.y * V.x;
+            float d = inDir.x * V.x + inDir.y * V.y;
 
             if (c > 1e-5f) return 3; // Left Plane
             if (c < -1e-5f) return 1; // Right Plane
