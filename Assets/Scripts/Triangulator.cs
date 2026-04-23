@@ -398,6 +398,22 @@ public static class Triangulator
     }
 
     /// <summary>
+    /// Phase 6: Burst 兼容的三角剖分入口 — 可在 IJob/IJobParallelFor 的 Execute 内部直接调用。
+    /// 与 EarClipJob.Execute() 逻辑完全一致，但作为静态方法暴露，避免 Job-in-Job 限制。
+    /// 调用者负责预分配 outputTriangles 并在使用后 Dispose。
+    /// </summary>
+    internal static void EarClipBurst(NativeArray<float2> vertices, ref NativeList<int> outputTriangles)
+    {
+        EarClipJob job = new EarClipJob
+        {
+            Vertices = vertices,
+            Triangles = outputTriangles
+        };
+        // 直接调用 Execute() 方法体（不经过 Job 调度系统），Burst 可内联优化
+        job.Execute();
+    }
+
+    /// <summary>
     /// Phase C-2: Native 零拷贝三角剖分入口 — 直接消费 MergeNative 的 NativeList&lt;float2&gt; 输出。
     /// 调用者拥有返回的 NativeList 并负责 Dispose。
     /// </summary>

@@ -243,6 +243,86 @@ public static class Slicer
     }
 
     /// <summary>
+    /// Phase 6: 从 NativeStream 输出直接重构对象（代替原有基于 PolygonData 的方案）
+    /// </summary>
+    public static void CreateSlicedObjectFromStream(
+        GameObject originalObj, 
+        Material mat, 
+        Rigidbody2D originalRb, 
+        Rect uvRefRect,
+        SliceContext nativeCtx,
+        Vector3[] vertices3D, 
+        Vector2[] uvs, 
+        int[] indices,
+        int2 outerRange, 
+        int2 holeData,
+        float area)
+    {
+        GameObject newObj = new GameObject(originalObj.name + "_Slice");
+        newObj.transform.position = originalObj.transform.position;
+        newObj.transform.rotation = originalObj.transform.rotation;
+        newObj.transform.localScale = originalObj.transform.localScale;
+        newObj.layer = originalObj.layer;
+        newObj.tag = originalObj.tag;
+
+        Mesh mesh = new Mesh();
+        mesh.vertices = vertices3D;
+        mesh.uv = uvs;
+        mesh.triangles = indices;
+        
+        Vector3[] normals = new Vector3[vertices3D.Length];
+        for (int i = 0; i < normals.Length; i++) normals[i] = new Vector3(0, 0, -1);
+        mesh.normals = normals;
+        mesh.RecalculateBounds();
+
+        MeshFilter mf = newObj.AddComponent<MeshFilter>();
+        mf.mesh = mesh;
+        MeshRenderer mr = newObj.AddComponent<MeshRenderer>();
+        mr.material = mat;
+
+        PolygonCollider2D pc = newObj.AddComponent<PolygonCollider2D>();
+        pc.enabled = false;
+
+        NativeArray<float2> flatLoops = nativeCtx.FlattenedLoops.AsArray();
+        pc.pathCount = 1 + holeData.y;
+
+        List<Vector2> tempPathList = nativeCtx.GetList();
+
+        FillListFromNativeRange(tempPathList, flatLoops, outerRange);
+        pc.SetPath(0, tempPathList);
+
+        for (int i = 0; i < holeData.y; i++)
+        {
+            int2 holeRange = nativeCtx.HoleRangeBuffer[holeData.x + i];
+            FillListFromNativeRange(tempPathList, flatLoops, holeRange);
+            pc.SetPath(i + 1, tempPathList);
+        }
+
+        nativeCtx.ReturnList(tempPathList);
+        pc.enabled = true;
+
+        SliceableGenerator newGen = newObj.AddComponent<SliceableGenerator>();
+        newGen.hasUVReference = true;
+        newGen.uvReferenceRect = uvRefRect;
+        newGen.autoGenerateOnStart = false;
+
+        if (originalRb != null)
+        {
+            Rigidbody2D newRb = newObj.AddComponent<Rigidbody2D>();
+            newRb.mass = originalRb.mass * (area / 10f); // 保持原有的简单比例计算
+            newRb.useAutoMass = true;
+            newRb.linearDamping = originalRb.linearDamping;
+            newRb.angularDamping = originalRb.angularDamping;
+            newRb.gravityScale = originalRb.gravityScale;
+            newRb.collisionDetectionMode = originalRb.collisionDetectionMode;
+            newRb.interpolation = originalRb.interpolation;
+            newRb.sharedMaterial = originalRb.sharedMaterial;
+            newRb.linearVelocity = originalRb.linearVelocity;
+            newRb.angularVelocity = originalRb.angularVelocity;
+        }
+    }
+
+    /// <summary>
     /// 从 FlattenedLoops 的范围切片填充池化 List（仅用于 PolygonCollider2D.SetPath）
     /// </summary>
     private static void FillListFromNativeRange(List<Vector2> list, NativeArray<float2> flatLoops, int2 range)

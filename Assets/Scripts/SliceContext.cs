@@ -23,6 +23,12 @@ public class SliceContext : IDisposable
     public NativeList<float4> LoopBounds;   // (minX, minY, maxX, maxY)
     public NativeList<int> HoleParents;     // 孔洞→父级solid的环索引，-1=非孔洞或无归属
 
+    // ---- Phase 6 搭桥合并 + 三角剖分 Job 输出 (由 BuildSolidHoleMapJob + MergeTriangulateJob 写入) ----
+    public NativeList<int2> SolidHoleMap;   // 等长于 LoopRanges: solid→(holeStart, holeCount)，非solid=(-1,0)
+    public NativeList<int2> HoleRangeBuffer; // 扁平化存储所有 solid 对应的孔洞范围
+    public NativeStream MeshDataStream;      // MergeTriangulateJob 的输出流
+    public float4 UVRect;                    // (minX, minY, width, height) UV 参照矩形
+
     // ---- 拓扑重建托管容器 (用于 Phase 3 还原为 Unity Mesh) ----
     public Stack<List<Vector2>> ListPool;
     public Stack<SlicerCore.PolygonData> PolyPool;
@@ -48,6 +54,8 @@ public class SliceContext : IDisposable
         LoopAreas = new NativeList<float>(128, Allocator.Persistent);
         LoopBounds = new NativeList<float4>(128, Allocator.Persistent);
         HoleParents = new NativeList<int>(128, Allocator.Persistent);
+        SolidHoleMap = new NativeList<int2>(128, Allocator.Persistent);
+        HoleRangeBuffer = new NativeList<int2>(64, Allocator.Persistent);
 
         ListPool = new Stack<List<Vector2>>();
         PolyPool = new Stack<SlicerCore.PolygonData>();
@@ -76,6 +84,9 @@ public class SliceContext : IDisposable
             LoopAreas.Clear();
             LoopBounds.Clear();
             HoleParents.Clear();
+            SolidHoleMap.Clear();
+            HoleRangeBuffer.Clear();
+            if (MeshDataStream.IsCreated) { MeshDataStream.Dispose(); MeshDataStream = default; }
         }
     }
 
@@ -122,6 +133,9 @@ public class SliceContext : IDisposable
         if (LoopAreas.IsCreated) LoopAreas.Dispose();
         if (LoopBounds.IsCreated) LoopBounds.Dispose();
         if (HoleParents.IsCreated) HoleParents.Dispose();
+        if (SolidHoleMap.IsCreated) SolidHoleMap.Dispose();
+        if (HoleRangeBuffer.IsCreated) HoleRangeBuffer.Dispose();
+        if (MeshDataStream.IsCreated) MeshDataStream.Dispose();
     }
 }
 

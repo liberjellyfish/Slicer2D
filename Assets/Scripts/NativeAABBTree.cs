@@ -202,6 +202,35 @@ public struct NativeAABBTree : IDisposable
         }
     }
 
+    /// <summary>
+    /// Phase 6: Burst 兼容的 Build 重载（用于 MergeTriangulateJob）
+    /// </summary>
+    public void Build(NativeArray<float2> flatLoops, int2 outerRange, NativeArray<int2> holeRanges, int holeStart, int holeCount)
+    {
+        int totalEdges = outerRange.y;
+        for (int i = 0; i < holeCount; i++)
+        {
+            totalEdges += holeRanges[holeStart + i].y;
+        }
+
+        segments = new NativeArray<Segment>(totalEdges, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
+        nodes = new NativeArray<FlatNode>(totalEdges * 2, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
+
+        int ptr = 0;
+        AddSegmentsFromNativeLoop(flatLoops, outerRange.x, outerRange.y, ref ptr, 0);
+        for (int i = 0; i < holeCount; i++)
+        {
+            int2 hr = holeRanges[holeStart + i];
+            AddSegmentsFromNativeLoop(flatLoops, hr.x, hr.y, ref ptr, i + 1);
+        }
+
+        nodesUsed = 0;
+        if (totalEdges > 0)
+        {
+            BuildRecursive(0, totalEdges);
+        }
+    }
+
     private void AddSegmentsFromNativeLoop(NativeArray<float2> flatLoops, int start, int count, ref int ptr, int pathId)
     {
         if (count < 2) return;

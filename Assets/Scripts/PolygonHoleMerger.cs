@@ -36,6 +36,19 @@ public class PolygonHoleMerger
         public int MaxXNode;
     }
 
+    private struct HoleDataBurst : System.IComparable<HoleDataBurst>
+    {
+        public int Head;
+        public int Count;
+        public float MaxX;
+        public int MaxXNode;
+
+        public int CompareTo(HoleDataBurst other)
+        {
+            return other.MaxX.CompareTo(MaxX); // 降序
+        }
+    }
+
     // 动态生成的"桥"记录
     // Phase C-1: A/B 从 Vector2 → float2
     public struct BridgeSegment
@@ -234,6 +247,165 @@ public class PolygonHoleMerger
             staticWallTree.Dispose();
         }
     }
+
+    /// <summary>
+    /// Phase 6: Burst 兼容的零拷贝合并入口 — 在 Job 内调用，完全抛弃 managed 引用。
+    /// </summary>
+    internal static NativeList<float2> MergeBurst(NativeArray<float2> flatLoops, int2 outerRange, NativeArray<int2> holeRanges, int holeStart, int holeCount)
+    {
+        if (holeCount == 0)
+        {
+            NativeList<float2> result = new NativeList<float2>(outerRange.y, Allocator.Temp);
+            var sub = flatLoops.GetSubArray(outerRange.x, outerRange.y);
+            result.AddRange(sub);
+            return result;
+        }
+
+        NativeAABBTree staticWallTree = new NativeAABBTree();
+        staticWallTree.Build(flatLoops, outerRange, holeRanges, holeStart, holeCount);
+
+        int totalNodes = outerRange.y;
+        for (int i = 0; i < holeCount; i++) totalNodes += holeRanges[holeStart + i].y;
+        int maxNodes = totalNodes + holeCount * 2;
+
+        NativeArray<NativeListNode> nodes = new NativeArray<NativeListNode>(maxNodes, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
+        int nextFreeIndex = totalNodes;
+
+        NativeList<HoleDataBurst> holeDatas = new NativeList<HoleDataBurst>(holeCount, Allocator.Temp);
+        NativeList<BridgeSegment> dynamicBridges = new NativeList<BridgeSegment>(holeCount, Allocator.Temp);
+
+        try
+        {
+            int outerHead = CreateLoopFromNative(flatLoops, outerRange.x, outerRange.y, ref nodes, 0);
+
+            int currentOffset = outerRange.y;
+            for (int i = 0; i < holeCount; i++)
+            {
+                int2 hr = holeRanges[holeStart + i];
+                if (hr.y < 3) continue;
+
+                int head = CreateLoopFromNative(flatLoops, hr.x, hr.y, ref nodes, currentOffset);
+                currentOffset += hr.y;
+
+                int curr = head;
+                int maxNode = head;
+                float maxX = -float.MaxValue;
+                int count = 0;
+                int watchdog = 0;
+                int watchdogLimit = maxNodes * 2;
+                do
+                {
+                    if (nodes[curr].Position.x > maxX)
+                    {
+                        maxX = nodes[curr].Position.x;
+                        maxNode = curr;
+                    }
+                    curr = nodes[curr].Next;
+                    count++;
+                    watchdog++;
+                    if (watchdog > watchdogLimit) break;
+                } while (curr != head);
+
+                holeDatas.Add(new HoleDataBurst { Head = head, Count = count, MaxX = maxX, MaxXNode = maxNode });
+            }
+
+            holeDatas.Sort();
+
+            for (int i = 0; i < holeDatas.Length; i++)
+            {
+                var hole = holeDatas[i];
+                float2 M = nodes[hole.MaxXNode].Position;
+                int bestP = FindBestBridgePointBurst(M, outerHead, ref nodes, staticWallTree, dynamicBridges, maxNodes);
+
+                if (bestP != -1)
+                {
+                    float2 P = nodes[bestP].Position;
+                    dynamicBridges.Add(new BridgeSegment { A = M, B = P });
+                    StitchLists(bestP, hole.MaxXNode, ref nodes, ref nextFreeIndex);
+                }
+            }
+
+            return FlattenListNative(outerHead, ref nodes, maxNodes, Allocator.Temp);
+        }
+        finally
+        {
+            if (nodes.IsCreated) nodes.Dispose();
+            staticWallTree.Dispose();
+            if (holeDatas.IsCreated) holeDatas.Dispose();
+            if (dynamicBridges.IsCreated) dynamicBridges.Dispose();
+        }
+    }
+
+    private static int FindBestBridgePointBurst(
+        float2 M,
+        int outerLoop,
+        ref NativeArray<NativeListNode> nodes,
+        NativeAABBTree tree,
+        NativeList<BridgeSegment> bridges,
+        int limitNodesCount)
+    {
+        NativeList<float2> candidates = new NativeList<float2>(limitNodesCount, Allocator.Temp);
+        NativeList<int> candidateIndices = new NativeList<int>(limitNodesCount, Allocator.Temp);
+        
+        try
+        {
+            int curr = outerLoop;
+            int watchdog = 0;
+            do
+            {
+                if (curr < 0 || curr >= nodes.Length) break;
+                candidates.Add(nodes[curr].Position);
+                candidateIndices.Add(curr);
+                curr = nodes[curr].Next;
+                watchdog++;
+                if (watchdog > limitNodesCount * 2) break;
+            } while (curr != outerLoop);
+
+            int bestNode = -1;
+            float minDistSq = float.MaxValue;
+
+            for (int i = 0; i < candidates.Length; i++)
+            {
+                float2 P = candidates[i];
+                float dx = P.x - M.x; float dy = P.y - M.y;
+                float distSq = dx * dx + dy * dy;
+
+                if (P.x <= M.x) distSq += 1000000f;
+
+                if (distSq < minDistSq)
+                {
+                    if (IsBridgeValidBurst(M, P, tree, bridges))
+                    {
+                        minDistSq = distSq;
+                        bestNode = candidateIndices[i];
+                    }
+                }
+            }
+            return bestNode;
+        }
+        finally
+        {
+            candidates.Dispose();
+            candidateIndices.Dispose();
+        }
+    }
+
+    private static bool IsBridgeValidBurst(float2 start, float2 end, NativeAABBTree tree, NativeList<BridgeSegment> bridges)
+    {
+        if (tree.Intersects(start, end)) return false;
+
+        int bridgeCount = bridges.Length;
+        for (int i = 0; i < bridgeCount; i++)
+        {
+            BridgeSegment b = bridges[i];
+            if (IsSamePoint(start, b.A) || IsSamePoint(start, b.B) ||
+                IsSamePoint(end, b.A) || IsSamePoint(end, b.B)) return false;
+
+            if (SegmentsIntersect(start, end, b.A, b.B)) return false;
+        }
+        return true;
+    }
+
 
     private static int FindBestBridgePoint(
         float2 M,
