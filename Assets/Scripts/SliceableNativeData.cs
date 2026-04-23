@@ -54,14 +54,14 @@ public class SliceableNativeData : MonoBehaviour
     /// 提供给切割管线后处理碎片的无 GC 初始化接口。
     /// 接管来自底层生成的 Native 数据，跳过中间托管的 Vector2[]
     /// </summary>
-    public void InitFromNative(NativeArray<float2> vertices, NativeArray<int2> pathRanges)
+    public void InitFromNative(NativeArray<float2> persistentVertices, NativeArray<int2> persistentPathRanges)
     {
-        // 彻底切断与托管的关联。进行一次 Native 间的深拷贝，保证生命周期独立。
+        // 彻底切断与托管的关联。直接接管传入的 Persistent 内存，保证生命周期独立且零拷贝。
         if (CachedVertices.IsCreated) CachedVertices.Dispose();
         if (CachedPathRanges.IsCreated) CachedPathRanges.Dispose();
 
-        this.CachedVertices = new NativeArray<float2>(vertices, Allocator.Persistent);
-        this.CachedPathRanges = new NativeArray<int2>(pathRanges, Allocator.Persistent);
+        this.CachedVertices = persistentVertices;
+        this.CachedPathRanges = persistentPathRanges;
 
         // TODO: Phase 4 这里将对接 PhysicsShapeGroup2D 底层构建碰撞体，彻底越过 SetPath() 
     }

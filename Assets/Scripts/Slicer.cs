@@ -185,8 +185,49 @@ public static class Slicer
 
             if (useNativePath)
             {
-                // Native 路径：使用单个池化列表复用给所有 SetPath，零稳态 GC
+                pc.pathCount = 0; // Guard against Awake GC
                 int holeCount = data.NativeHoleRanges != null ? data.NativeHoleRanges.Count : 0;
+
+                // --- Start B-2 Injection ---
+                int totalVerts = data.NativeOuterRange.y;
+                for (int i = 0; i < holeCount; i++)
+                {
+                    totalVerts += data.NativeHoleRanges[i].y;
+                }
+
+                NativeArray<float2> newVertices = default;
+                NativeArray<int2> newPathRanges = default;
+
+                try
+                {
+                    newVertices = new NativeArray<float2>(totalVerts, Allocator.Persistent);
+                    newPathRanges = new NativeArray<int2>(1 + holeCount, Allocator.Persistent);
+
+                    int currentOffset = 0;
+                    NativeArray<float2>.Copy(flatLoops, data.NativeOuterRange.x, newVertices, currentOffset, data.NativeOuterRange.y);
+                    newPathRanges[0] = new int2(currentOffset, data.NativeOuterRange.y);
+                    currentOffset += data.NativeOuterRange.y;
+
+                    for (int i = 0; i < holeCount; i++)
+                    {
+                        int2 holeRange = data.NativeHoleRanges[i];
+                        NativeArray<float2>.Copy(flatLoops, holeRange.x, newVertices, currentOffset, holeRange.y);
+                        newPathRanges[1 + i] = new int2(currentOffset, holeRange.y);
+                        currentOffset += holeRange.y;
+                    }
+
+                    SliceableNativeData nativeData = newObj.AddComponent<SliceableNativeData>();
+                    nativeData.InitFromNative(newVertices, newPathRanges);
+                }
+                catch (System.Exception e)
+                {
+                    if (newVertices.IsCreated) newVertices.Dispose();
+                    if (newPathRanges.IsCreated) newPathRanges.Dispose();
+                    Debug.LogError($"[Slicer] NativeData Injection Error: {e.Message}");
+                }
+                // --- End B-2 Injection ---
+
+                // Native 路径：使用单个池化列表复用给所有 SetPath，零稳态 GC
                 pc.pathCount = 1 + holeCount;
 
                 List<Vector2> tempPathList = nativeCtx.GetList();
@@ -270,8 +311,51 @@ public static class Slicer
 
         PolygonCollider2D pc = newObj.AddComponent<PolygonCollider2D>();
         pc.enabled = false;
+        pc.pathCount = 0; // Guard against Awake GC
 
         NativeArray<float2> flatLoops = nativeCtx.FlattenedLoops.AsArray();
+
+        // --- Start B-2 Injection ---
+        int totalVerts = outerRange.y;
+        for (int i = 0; i < holeData.y; i++)
+        {
+            totalVerts += nativeCtx.HoleRangeBuffer[holeData.x + i].y;
+        }
+
+        NativeArray<float2> newVertices = default;
+        NativeArray<int2> newPathRanges = default;
+
+        try
+        {
+            newVertices = new NativeArray<float2>(totalVerts, Allocator.Persistent);
+            newPathRanges = new NativeArray<int2>(1 + holeData.y, Allocator.Persistent);
+
+            int currentOffset = 0;
+            // Outer loop
+            NativeArray<float2>.Copy(flatLoops, outerRange.x, newVertices, currentOffset, outerRange.y);
+            newPathRanges[0] = new int2(currentOffset, outerRange.y);
+            currentOffset += outerRange.y;
+
+            // Hole loops
+            for (int i = 0; i < holeData.y; i++)
+            {
+                int2 holeRange = nativeCtx.HoleRangeBuffer[holeData.x + i];
+                NativeArray<float2>.Copy(flatLoops, holeRange.x, newVertices, currentOffset, holeRange.y);
+                newPathRanges[1 + i] = new int2(currentOffset, holeRange.y);
+                currentOffset += holeRange.y;
+            }
+
+            SliceableNativeData nativeData = newObj.AddComponent<SliceableNativeData>();
+            nativeData.InitFromNative(newVertices, newPathRanges);
+        }
+        catch (System.Exception e)
+        {
+            if (newVertices.IsCreated) newVertices.Dispose();
+            if (newPathRanges.IsCreated) newPathRanges.Dispose();
+            Debug.LogError($"[Slicer] NativeData Injection Error: {e.Message}");
+        }
+        // --- End B-2 Injection ---
+
         pc.pathCount = 1 + holeData.y;
 
         List<Vector2> tempPathList = nativeCtx.GetList();
