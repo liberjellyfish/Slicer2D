@@ -28,6 +28,7 @@ public class SliceContext : IDisposable
     public NativeList<int2> HoleRangeBuffer; // 扁平化存储所有 solid 对应的孔洞范围
     public NativeStream MeshDataStream;      // MergeTriangulateJob 的输出流
     public float4 UVRect;                    // (minX, minY, width, height) UV 参照矩形
+    public UnityEngine.Mesh.MeshDataArray MeshDataArray; // 分配的 WritableMeshData
 
     // ---- 拓扑重建托管容器 (用于 Phase 3 还原为 Unity Mesh) ----
     public Stack<List<Vector2>> ListPool;
@@ -87,6 +88,8 @@ public class SliceContext : IDisposable
             SolidHoleMap.Clear();
             HoleRangeBuffer.Clear();
             if (MeshDataStream.IsCreated) { MeshDataStream.Dispose(); MeshDataStream = default; }
+            // Dispose MeshDataArray if it was not consumed by ApplyAndDisposeWritableMeshData
+            if (MeshDataArray.Length > 0) { MeshDataArray.Dispose(); MeshDataArray = default; }
         }
     }
 
@@ -136,6 +139,7 @@ public class SliceContext : IDisposable
         if (SolidHoleMap.IsCreated) SolidHoleMap.Dispose();
         if (HoleRangeBuffer.IsCreated) HoleRangeBuffer.Dispose();
         if (MeshDataStream.IsCreated) MeshDataStream.Dispose();
+        if (MeshDataArray.Length > 0) MeshDataArray.Dispose();
     }
 }
 

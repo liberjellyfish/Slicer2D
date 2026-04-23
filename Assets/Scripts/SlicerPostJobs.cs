@@ -11,6 +11,14 @@ using Unity.Mathematics;
 /// </summary>
 public static partial class SlicerCore
 {
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    public struct SliceVertex
+    {
+        public float3 Position;
+        public float3 Normal;
+        public float2 UV;
+    }
+
     // =================================================================================
     //                    Phase 5 原生路径简化与环分类 Job
     // =================================================================================
@@ -303,8 +311,11 @@ public static partial class SlicerCore
             for (int i = 0; i < vertCount; i++)
             {
                 float2 v = merged[i];
-                MeshDataWriter.Write(new float3(v.x, v.y, 0f));
-                MeshDataWriter.Write(new float2((v.x - uMin) / width, (v.y - vMin) / height));
+                MeshDataWriter.Write(new SliceVertex {
+                    Position = new float3(v.x, v.y, 0f),
+                    Normal = new float3(0f, 0f, -1f),
+                    UV = new float2((v.x - uMin) / width, (v.y - vMin) / height)
+                });
             }
 
             MeshDataWriter.Write(triCount);
@@ -317,6 +328,68 @@ public static partial class SlicerCore
             triangles.Dispose();
 
             MeshDataWriter.EndForEachIndex();
+        }
+    }
+
+    /// <summary>
+    /// Phase 6c: 从 NativeStream 并行拷贝数据到 MeshDataArray (完全零 GC)
+    /// </summary>
+    [BurstCompile(CompileSynchronously = true, FloatMode = FloatMode.Fast)]
+    public struct BuildMeshDataJob : IJobParallelFor
+    {
+        [ReadOnly] public NativeStream.Reader StreamReader;
+        public UnityEngine.Mesh.MeshDataArray MeshDataArray;
+
+        public void Execute(int index)
+        {
+            int count = StreamReader.BeginForEachIndex(index);
+            var meshData = MeshDataArray[index];
+
+            if (count == 0)
+            {
+                var emptyDesc = new NativeArray<UnityEngine.Rendering.VertexAttributeDescriptor>(1, Allocator.Temp);
+                emptyDesc[0] = new UnityEngine.Rendering.VertexAttributeDescriptor(UnityEngine.Rendering.VertexAttribute.Position);
+                meshData.SetVertexBufferParams(0, emptyDesc);
+                emptyDesc.Dispose();
+                
+                meshData.SetIndexBufferParams(0, UnityEngine.Rendering.IndexFormat.UInt16);
+                meshData.subMeshCount = 1;
+                meshData.SetSubMesh(0, new UnityEngine.Rendering.SubMeshDescriptor(0, 0), UnityEngine.Rendering.MeshUpdateFlags.DontRecalculateBounds);
+
+                StreamReader.EndForEachIndex();
+                return;
+            }
+
+            int vertCount = StreamReader.Read<int>();
+
+            var descriptors = new NativeArray<UnityEngine.Rendering.VertexAttributeDescriptor>(3, Allocator.Temp);
+            descriptors[0] = new UnityEngine.Rendering.VertexAttributeDescriptor(UnityEngine.Rendering.VertexAttribute.Position, UnityEngine.Rendering.VertexAttributeFormat.Float32, 3);
+            descriptors[1] = new UnityEngine.Rendering.VertexAttributeDescriptor(UnityEngine.Rendering.VertexAttribute.Normal, UnityEngine.Rendering.VertexAttributeFormat.Float32, 3);
+            descriptors[2] = new UnityEngine.Rendering.VertexAttributeDescriptor(UnityEngine.Rendering.VertexAttribute.TexCoord0, UnityEngine.Rendering.VertexAttributeFormat.Float32, 2);
+            
+            meshData.SetVertexBufferParams(vertCount, descriptors);
+            descriptors.Dispose();
+
+            var verts = meshData.GetVertexData<SliceVertex>();
+            for (int i = 0; i < vertCount; i++)
+            {
+                verts[i] = StreamReader.Read<SliceVertex>();
+            }
+
+            int triCount = StreamReader.Read<int>();
+            meshData.SetIndexBufferParams(triCount, UnityEngine.Rendering.IndexFormat.UInt16);
+            
+            var indices = meshData.GetIndexData<ushort>();
+            for (int i = 0; i < triCount; i++)
+            {
+                indices[i] = (ushort)StreamReader.Read<int>();
+            }
+
+            meshData.subMeshCount = 1;
+            meshData.SetSubMesh(0, new UnityEngine.Rendering.SubMeshDescriptor(0, triCount), 
+                UnityEngine.Rendering.MeshUpdateFlags.DontRecalculateBounds | UnityEngine.Rendering.MeshUpdateFlags.DontValidateIndices);
+
+            StreamReader.EndForEachIndex();
         }
     }
 }

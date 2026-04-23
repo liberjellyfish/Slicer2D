@@ -245,15 +245,13 @@ public static class Slicer
     /// <summary>
     /// Phase 6: 从 NativeStream 输出直接重构对象（代替原有基于 PolygonData 的方案）
     /// </summary>
-    public static void CreateSlicedObjectFromStream(
+    public static void CreateSlicedObjectFromMesh(
         GameObject originalObj, 
         Material mat, 
         Rigidbody2D originalRb, 
         Rect uvRefRect,
         SliceContext nativeCtx,
-        Vector3[] vertices3D, 
-        Vector2[] uvs, 
-        int[] indices,
+        Mesh mesh,
         int2 outerRange, 
         int2 holeData,
         float area)
@@ -264,16 +262,6 @@ public static class Slicer
         newObj.transform.localScale = originalObj.transform.localScale;
         newObj.layer = originalObj.layer;
         newObj.tag = originalObj.tag;
-
-        Mesh mesh = new Mesh();
-        mesh.vertices = vertices3D;
-        mesh.uv = uvs;
-        mesh.triangles = indices;
-        
-        Vector3[] normals = new Vector3[vertices3D.Length];
-        for (int i = 0; i < normals.Length; i++) normals[i] = new Vector3(0, 0, -1);
-        mesh.normals = normals;
-        mesh.RecalculateBounds();
 
         MeshFilter mf = newObj.AddComponent<MeshFilter>();
         mf.mesh = mesh;
