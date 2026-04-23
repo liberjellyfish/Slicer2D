@@ -216,8 +216,27 @@ public static class Slicer
                         currentOffset += holeRange.y;
                     }
 
+                    // Guard against Awake GC exactly here, explicitly setting 0 overrides any auto-generation
+                    pc.pathCount = 0;
                     SliceableNativeData nativeData = newObj.AddComponent<SliceableNativeData>();
                     nativeData.InitFromNative(newVertices, newPathRanges);
+
+                    // --- Start B-3 Fallback (O(N) CPU, Zero GC) ---
+                    pc.pathCount = 1 + holeCount;
+                    List<Vector2> tempPathList = nativeCtx.GetList();
+                    
+                    FillListFromPersistentRange(tempPathList, newVertices, newPathRanges[0].x, newPathRanges[0].y);
+                    pc.SetPath(0, tempPathList);
+                    
+                    for (int i = 0; i < holeCount; i++)
+                    {
+                        int2 currentRange = newPathRanges[1 + i];
+                        FillListFromPersistentRange(tempPathList, newVertices, currentRange.x, currentRange.y);
+                        pc.SetPath(i + 1, tempPathList);
+                    }
+                    
+                    nativeCtx.ReturnList(tempPathList);
+                    // --- End B-3 Fallback ---
                 }
                 catch (System.Exception e)
                 {
@@ -226,22 +245,6 @@ public static class Slicer
                     Debug.LogError($"[Slicer] NativeData Injection Error: {e.Message}");
                 }
                 // --- End B-2 Injection ---
-
-                // Native 路径：使用单个池化列表复用给所有 SetPath，零稳态 GC
-                pc.pathCount = 1 + holeCount;
-
-                List<Vector2> tempPathList = nativeCtx.GetList();
-
-                FillListFromNativeRange(tempPathList, flatLoops, data.NativeOuterRange);
-                pc.SetPath(0, tempPathList);
-
-                for (int i = 0; i < holeCount; i++)
-                {
-                    FillListFromNativeRange(tempPathList, flatLoops, data.NativeHoleRanges[i]);
-                    pc.SetPath(i + 1, tempPathList);
-                }
-
-                nativeCtx.ReturnList(tempPathList);
             }
             else
             {
@@ -345,8 +348,27 @@ public static class Slicer
                 currentOffset += holeRange.y;
             }
 
+            // Guard against Awake GC exactly here
+            pc.pathCount = 0; 
             SliceableNativeData nativeData = newObj.AddComponent<SliceableNativeData>();
             nativeData.InitFromNative(newVertices, newPathRanges);
+
+            // --- Start B-3 Fallback (O(N) CPU, Zero GC) ---
+            pc.pathCount = 1 + holeData.y;
+            List<Vector2> tempPathList = nativeCtx.GetList();
+
+            FillListFromPersistentRange(tempPathList, newVertices, newPathRanges[0].x, newPathRanges[0].y);
+            pc.SetPath(0, tempPathList);
+
+            for (int i = 0; i < holeData.y; i++)
+            {
+                int2 currentRange = newPathRanges[1 + i];
+                FillListFromPersistentRange(tempPathList, newVertices, currentRange.x, currentRange.y);
+                pc.SetPath(i + 1, tempPathList);
+            }
+
+            nativeCtx.ReturnList(tempPathList);
+            // --- End B-3 Fallback ---
         }
         catch (System.Exception e)
         {
@@ -355,22 +377,7 @@ public static class Slicer
             Debug.LogError($"[Slicer] NativeData Injection Error: {e.Message}");
         }
         // --- End B-2 Injection ---
-
-        pc.pathCount = 1 + holeData.y;
-
-        List<Vector2> tempPathList = nativeCtx.GetList();
-
-        FillListFromNativeRange(tempPathList, flatLoops, outerRange);
-        pc.SetPath(0, tempPathList);
-
-        for (int i = 0; i < holeData.y; i++)
-        {
-            int2 holeRange = nativeCtx.HoleRangeBuffer[holeData.x + i];
-            FillListFromNativeRange(tempPathList, flatLoops, holeRange);
-            pc.SetPath(i + 1, tempPathList);
-        }
-
-        nativeCtx.ReturnList(tempPathList);
+        
         pc.enabled = true;
 
         SliceableGenerator newGen = newObj.AddComponent<SliceableGenerator>();
@@ -395,14 +402,15 @@ public static class Slicer
     }
 
     /// <summary>
-    /// 从 FlattenedLoops 的范围切片填充池化 List（仅用于 PolygonCollider2D.SetPath）
+    /// 从 Persistent NativeArray 极速填充池化 List（零分配 GC，用于 PolygonCollider2D.SetPath 回退）
     /// </summary>
-    private static void FillListFromNativeRange(List<Vector2> list, NativeArray<float2> flatLoops, int2 range)
+    private static void FillListFromPersistentRange(List<Vector2> list, NativeArray<float2> vertices, int start, int count)
     {
         list.Clear();
-        for (int i = 0; i < range.y; i++)
+        if (list.Capacity < count) list.Capacity = count;
+        for (int i = 0; i < count; i++)
         {
-            float2 v = flatLoops[range.x + i];
+            float2 v = vertices[start + i];
             list.Add(new Vector2(v.x, v.y));
         }
     }
