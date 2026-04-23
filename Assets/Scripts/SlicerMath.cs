@@ -109,7 +109,7 @@ public static class SlicerMath
                 {
                     // 发现自交！提取从 j+1 到 i 的闭合环
                     extractedLoop = new List<Vector2>();
-                    extractedLoop.Add(intersection);
+                    //extractedLoop.Add(intersection);
                     for (int k = j + 1; k <= i; k++)
                     {
                         extractedLoop.Add(path[k]);

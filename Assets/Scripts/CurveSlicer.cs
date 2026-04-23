@@ -38,42 +38,70 @@ public static class CurveSlicer
 
         bool isPureHolePunch = false;
 
-        // === Step A: 对非闭合路径——仅执行稳定的标准延长 ===
+        // === Step A: 全面升级的智能闭合与延长策略 ===
         if (!isClosed)
         {
-            float extensionLength = Mathf.Max(referenceRect.width, referenceRect.height) * 1.5f + 1.0f;
-
-            int last = localCutPath.Count - 1;
-            Vector2 headDir = (localCutPath[1] - localCutPath[0]).normalized;
-            Vector2 tailDir = (localCutPath[last] - localCutPath[last - 1]).normalized;
-
-            // 废弃旧的“射线收敛检测”，由于其面对高曲率螺旋线/钩型线时极容易暴走生成遮天蔽日的幽灵巨型闭环，
-            // 直接采用极其稳定可靠的首尾双向爆展拉飞策略，确保切割必出边界、不留暗病。
-            if (headDir != Vector2.zero)
-            {
-                localCutPath[0] = localCutPath[0] - headDir * extensionLength;
-            }
-
-            int lastIdx = localCutPath.Count - 1;
-            if (tailDir != Vector2.zero)
-            {
-                localCutPath[lastIdx] = localCutPath[lastIdx] + tailDir * extensionLength;
-            }
-
-            // 延长后自交检测（兜底：标准延长截断可能激发出新的闭合）
+            // 1. 物理自交检测 (原味笔迹自交，如画了个 "8" 字或相交圈)
             if (SlicerMath.DetectAndResolveSelfIntersection(localCutPath, out List<Vector2> postExtLoop))
             {
                 isClosed = true;
-                Debug.Log($"[Slicer] 延长后检测到自交闭环，已提取环 ({localCutPath.Count} 点)，切换为闭环模式");
+                Debug.Log($"[Slicer] 原始路径自交闭环，切换为闭环模式");
+            }
+            // 2. 强效近似闭合检测 (处理没完全接拢的圈)
+            // 阻断没画拢的圈被当成开路线并产生远端交叉暴射！
+            else if (localCutPath.Count >= 3)
+            {
+                float gap = Vector2.Distance(localCutPath[0], localCutPath[localCutPath.Count - 1]);
+                float pathLength = SlicerMath.PolylineLength(localCutPath);
+
+                // 如果首尾距离小于总长度的 25%，或者绝对距离很近，直接视为玩家意图挖孔
+                if (gap < pathLength * 0.25f || gap < referenceRect.width * 0.1f)
+                {
+                    isClosed = true;
+                    Debug.Log($"[Slicer] 路径近似闭合 (Gap: {gap:F2})，自动转为挖孔模式");
+                }
+            }
+
+            // 3. 确认为纯开路切割，执行安全的“防自交”延长
+            if (!isClosed && localCutPath.Count >= 2)
+            {
+                float maxExt = Mathf.Max(referenceRect.width, referenceRect.height) * 1.5f + 1.0f;
+                Vector2 headDir = (localCutPath[1] - localCutPath[0]).normalized;
+                Vector2 tailDir = (localCutPath[localCutPath.Count - 1] - localCutPath[localCutPath.Count - 2]).normalized;
+
+                Vector2 extHead = localCutPath[0] - headDir * maxExt;
+                Vector2 extTail = localCutPath[localCutPath.Count - 1] + tailDir * maxExt;
+
+                // 防止两根人工延长线在远方相交，形成自交幽灵线！
+                if (SlicerMath.SegmentSegmentIntersect(extHead, localCutPath[0], localCutPath[localCutPath.Count - 1], extTail, out Vector2 intersection))
+                {
+                    // 刹车截断：在相交点前稍微缩回，保持完美开路且绝对不自交
+                    extHead = intersection + headDir * 0.05f;
+                    extTail = intersection - tailDir * 0.05f;
+                    Debug.Log("[Slicer] 延长线发生远端交叉，已安全截断");
+                }
+
+                if (headDir != Vector2.zero)
+                    localCutPath.Insert(0, extHead);
+
+                if (tailDir != Vector2.zero)
+                    localCutPath.Add(extTail);
+
+                // 兜底：如果延长线向内切到了玩家自己的笔迹，提取成纯净闭环
+                if (SlicerMath.DetectAndResolveSelfIntersection(localCutPath, out List<Vector2> finalLoop))
+                {
+                    isClosed = true;
+                    Debug.Log("[Slicer] 延长后触发自交，转为闭环");
+                }
             }
         }
 
-        // === Step B: 对闭合路径（包括延长后新发现的闭合）执行虚空自旋 ===
+        // === Step B: 对闭合路径执行虚空自旋 ===
         if (isClosed)
         {
             int emptySpaceIndex = -1;
             List<Vector2> outerPath = originalPaths[0];
-            
+
             bool IsPointInEmptySpace(Vector2 p)
             {
                 if (!SlicerMath.PointInPolygon(p, outerPath)) return true;
@@ -91,7 +119,7 @@ public static class CurveSlicer
                     emptySpaceIndex = i;
                     break;
                 }
-                
+
                 if (i < localCutPath.Count - 1)
                 {
                     Vector2 p0 = localCutPath[i];
@@ -119,15 +147,15 @@ public static class CurveSlicer
             }
             else
             {
-                // [跨越边界/孔洞] 环线部分在肉外，存在拓扑切割，必须自旋对齐虚空起点
-                // 即使 emptySpaceIndex == 0 也走一遍，因为必须确保首尾在内存结构上完美物理缝合（rotated[0] = rotated[last]）
+                // 【核心修复】：由于我们在 SlicerMath 删除了多余的交点，这里直接遍历全部点即可。
+                // 彻底去掉 validCount 和 hasDuplicateEnd 逻辑，防止误删最后一个拐点！
                 List<Vector2> rotated = new List<Vector2>(localCutPath.Count);
-                for (int i = emptySpaceIndex; i < localCutPath.Count - 1; i++) // -1 抛弃任何残缺的末尾
+
+                for (int i = emptySpaceIndex; i < localCutPath.Count; i++)
                     rotated.Add(localCutPath[i]);
                 for (int i = 0; i < emptySpaceIndex; i++)
                     rotated.Add(localCutPath[i]);
-                
-                rotated.Add(rotated[0]); // 重新完美闭合
+
                 localCutPath = rotated;
             }
         }
@@ -137,6 +165,18 @@ public static class CurveSlicer
         {
             PerformHolePunch(target, meshRenderer, originalRb, referenceRect, originalPaths, localCutPath);
             return;
+        }
+
+        // 【核心隔离修复】：CurveSlicerCore 原生层依靠相邻点连线 (0->1, 1->2...)。
+        // 如果判定为闭环（且不是完全在内部的纯挖孔，也就是跨越边界的“咬边”切割），
+        // 必须在末尾补一个首点，让最后一条边物理闭合！
+        if (isClosed && localCutPath.Count > 0)
+        {
+            // 防御性验证，确保没有重复加点
+            if ((localCutPath[0] - localCutPath[localCutPath.Count - 1]).sqrMagnitude > 1e-6f)
+            {
+                localCutPath.Add(localCutPath[0]);
+            }
         }
 
         // ==============================================================
@@ -153,9 +193,9 @@ public static class CurveSlicer
 
         // 立即发车，将重负荷工作扔给 Worker Thread
         Unity.Jobs.JobHandle handle = CurveSlicerCore.ScheduleCurveSliceJob(
-            nativeData.CachedVertices, 
-            nativeData.CachedPathRanges, 
-            nativeCutPath, 
+            nativeData.CachedVertices,
+            nativeData.CachedPathRanges,
+            nativeCutPath,
             context
         );
 
@@ -177,7 +217,7 @@ public static class CurveSlicer
     /// <summary>
     /// 纯净内部挖孔切割：当闭合环完全处于多边形内部，且未切割外圈与内穴边时执行。
     /// </summary>
-    private static void PerformHolePunch(GameObject target, MeshRenderer meshRenderer, Rigidbody2D originalRb, 
+    private static void PerformHolePunch(GameObject target, MeshRenderer meshRenderer, Rigidbody2D originalRb,
                                          Rect referenceRect, List<List<Vector2>> originalPaths, List<Vector2> localLoop)
     {
         List<Vector2> outerPath = originalPaths[0];
@@ -201,7 +241,7 @@ public static class CurveSlicer
             return;
         }
 
-        if (loopArea > 0) localLoop.Reverse(); 
+        if (loopArea > 0) localLoop.Reverse();
 
         SlicerCore.PolygonData motherPoly = new SlicerCore.PolygonData();
         motherPoly.OuterLoop = originalPaths[0];
@@ -222,13 +262,13 @@ public static class CurveSlicer
         motherPoly.Area = Mathf.Abs(motherArea / 2f);
 
         List<Vector2> pieceBoundary = new List<Vector2>(localLoop);
-        pieceBoundary.Reverse(); 
+        pieceBoundary.Reverse();
 
         SlicerCore.PolygonData piecePoly = new SlicerCore.PolygonData();
         piecePoly.OuterLoop = pieceBoundary;
         piecePoly.Holes = new List<List<Vector2>>();
 
-        for (int i = motherPoly.Holes.Count - 2; i >= 0; i--) 
+        for (int i = motherPoly.Holes.Count - 2; i >= 0; i--)
         {
             List<Vector2> existingHole = motherPoly.Holes[i];
             if (existingHole.Count > 0 && SlicerMath.PointInPolygon(existingHole[0], pieceBoundary))
