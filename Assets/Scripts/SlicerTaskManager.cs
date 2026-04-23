@@ -14,6 +14,7 @@ public struct PendingSliceTask
     public Unity.Collections.NativeArray<float2> CurveCutPathArray;
     public bool IsCurve;
     public int State; // 0: 拓扑构建中(Phase 1-5), 1: 网格与搭桥处理中(Phase 6)
+    public bool IsPureHolePunch; // 状态机硬隔离标识，用于跳过不必要的孔洞映射推断
 }
 
 /// <summary>

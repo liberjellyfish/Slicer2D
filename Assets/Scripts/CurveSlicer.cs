@@ -1,6 +1,7 @@
 using UnityEngine;
 using System.Collections.Generic;
 using Unity.Collections;
+using Unity.Jobs;
 
 public static class CurveSlicer
 {
@@ -252,15 +253,6 @@ public static class CurveSlicer
         }
         motherPoly.Holes.Add(localLoop);
 
-        float motherArea = 0;
-        for (int i = 0; i < motherPoly.OuterLoop.Count; i++)
-        {
-            Vector2 p1 = motherPoly.OuterLoop[i];
-            Vector2 p2 = motherPoly.OuterLoop[(i + 1) % motherPoly.OuterLoop.Count];
-            motherArea += (p1.x * p2.y) - (p2.x * p1.y);
-        }
-        motherPoly.Area = Mathf.Abs(motherArea / 2f);
-
         List<Vector2> pieceBoundary = new List<Vector2>(localLoop);
         pieceBoundary.Reverse();
 
@@ -278,30 +270,89 @@ public static class CurveSlicer
             }
         }
 
-        float pieceArea = 0;
-        for (int i = 0; i < pieceBoundary.Count; i++)
-        {
-            Vector2 p1 = pieceBoundary[i];
-            Vector2 p2 = pieceBoundary[(i + 1) % pieceBoundary.Count];
-            pieceArea += (p1.x * p2.y) - (p2.x * p1.y);
-        }
-        piecePoly.Area = Mathf.Abs(pieceArea / 2f);
+        SliceableNativeData nativeData = target.GetComponent<SliceableNativeData>();
+        if (nativeData == null) nativeData = target.AddComponent<SliceableNativeData>();
 
-        bool success = true;
-        try
+        SliceContext sys = SliceContextPool.Get();
+
+        // 1. 提前计算总顶点数和总环数
+        int totalPoints = motherPoly.OuterLoop.Count + piecePoly.OuterLoop.Count;
+        int totalLoops = 2 + motherPoly.Holes.Count + piecePoly.Holes.Count;
+        for (int i = 0; i < motherPoly.Holes.Count; i++) totalPoints += motherPoly.Holes[i].Count;
+        for (int i = 0; i < piecePoly.Holes.Count; i++) totalPoints += piecePoly.Holes[i].Count;
+
+        // 2. 一次性精准预分配
+        sys.FlattenedLoops.SetCapacity(totalPoints);
+        sys.LoopRanges.SetCapacity(totalLoops);
+        sys.LoopTypes.SetCapacity(totalLoops);
+        sys.LoopAreas.SetCapacity(totalLoops);
+        sys.LoopBounds.SetCapacity(totalLoops);
+        sys.HoleParents.SetCapacity(totalLoops);
+
+        // 3. 极简的 AddLoop 闭包
+        void AddLoop(List<Vector2> points, int parentIndex)
         {
-            Slicer.CreateSlicedObject(motherPoly, target, meshRenderer.sharedMaterial, originalRb, referenceRect);
-            Slicer.CreateSlicedObject(piecePoly, target, meshRenderer.sharedMaterial, originalRb, referenceRect);
-        }
-        catch (System.Exception e)
-        {
-            success = false;
-            Debug.LogError($"[Slicer] HolePunch MeshGen Error: {e.Message}");
+            int offset = sys.FlattenedLoops.Length;
+            int count = points.Count;
+            for (int i = 0; i < count; i++)
+            {
+                sys.FlattenedLoops.Add(new Unity.Mathematics.float2(points[i].x, points[i].y));
+            }
+            sys.LoopRanges.Add(new Unity.Mathematics.int2(offset, count));
+            sys.LoopTypes.Add(0);
+            sys.LoopAreas.Add(0f);
+            sys.LoopBounds.Add(Unity.Mathematics.float4.zero);
+            sys.HoleParents.Add(parentIndex);
         }
 
-        if (success)
+        // 4. 显式挂载序注入
+        int motherSolidIndex = sys.LoopRanges.Length;
+        AddLoop(motherPoly.OuterLoop, -1);
+
+        int pieceSolidIndex = sys.LoopRanges.Length;
+        AddLoop(piecePoly.OuterLoop, -1);
+
+        for (int i = 0; i < motherPoly.Holes.Count; i++)
         {
-            Object.Destroy(target);
+            AddLoop(motherPoly.Holes[i], motherSolidIndex);
         }
+
+        for (int i = 0; i < piecePoly.Holes.Count; i++)
+        {
+            AddLoop(piecePoly.Holes[i], pieceSolidIndex);
+        }
+
+        // 5. 调度 Phase 5 基础清理管线
+        Unity.Jobs.JobHandle simplifyHandle = new SlicerCore.SimplifyLoopsJob
+        {
+            FlattenedLoops = sys.FlattenedLoops,
+            LoopRanges = sys.LoopRanges,
+            MinVertDistSq = 0.0001f
+        }.Schedule();
+
+        Unity.Jobs.JobHandle classifyHandle = new SlicerCore.ClassifyLoopsJob
+        {
+            FlattenedLoops = sys.FlattenedLoops,
+            LoopRanges = sys.LoopRanges,
+            LoopTypes = sys.LoopTypes,
+            LoopAreas = sys.LoopAreas,
+            LoopBounds = sys.LoopBounds,
+            AreaThreshold = 0.01f
+        }.Schedule(simplifyHandle);
+
+        // 6. 组装异步任务交接
+        PendingSliceTask task = new PendingSliceTask
+        {
+            Context = sys,
+            Target = target,
+            NativeData = nativeData,
+            UVReferenceRect = referenceRect,
+            MainJobHandle = classifyHandle,
+            IsCurve = true,
+            IsPureHolePunch = true // 状态机硬隔离
+        };
+
+        SlicerTaskManager.Instance.Enqueue(task);
+        // 注意：原先的 Object.Destroy(target) 已删除，生命周期管理移交至 SlicerTaskManager 末端
     }
 }
