@@ -1,7 +1,9 @@
-using UnityEngine;
-using Unity.Mathematics;
+using System;
+using System.Buffers;
 using System.Collections.Generic;
 using Unity.Jobs;
+using Unity.Mathematics;
+using UnityEngine;
 
 public struct PendingSliceTask
 {
@@ -10,35 +12,34 @@ public struct PendingSliceTask
     public SliceableNativeData NativeData;
     public Rect UVReferenceRect;
     public JobHandle MainJobHandle;
-    // 用于处理遗留内存：存储对曲面绘制临时分配的 native arrays
     public Unity.Collections.NativeArray<float2> CurveCutPathArray;
     public bool IsCurve;
-    public int State; // 0: 拓扑构建中(Phase 1-5), 1: 网格与搭桥处理中(Phase 6)
-    public bool IsPureHolePunch; // 状态机硬隔离标识，用于跳过不必要的孔洞映射推断
+    public int State; // 0: topology stages, 1: mesh build stages
+    public bool IsPureHolePunch;
+    public PooledSlicePiece TargetPiece;
+    public int TargetVersion;
 }
 
-/// <summary>
-/// 全局切割任务调度器，提供异步跨帧轮询机制，加入单帧实例化预算保护。
-/// </summary>
 public class SlicerTaskManager : MonoBehaviour
 {
     private static SlicerTaskManager _instance;
+
     public static SlicerTaskManager Instance
     {
         get
         {
             if (_instance == null)
             {
-                var go = new GameObject("SlicerTaskManager");
+                GameObject go = new GameObject("SlicerTaskManager");
                 _instance = go.AddComponent<SlicerTaskManager>();
                 DontDestroyOnLoad(go);
             }
+
             return _instance;
         }
     }
 
-    // 使用 List 作为动态队列，支持乱序执行完毕时的中间删除
-    private List<PendingSliceTask> activeTasks = new List<PendingSliceTask>(256);
+    private readonly List<PendingSliceTask> activeTasks = new List<PendingSliceTask>(256);
 
     public void Enqueue(PendingSliceTask task)
     {
@@ -47,188 +48,298 @@ public class SlicerTaskManager : MonoBehaviour
 
     private void Update()
     {
-        if (activeTasks.Count == 0) return;
+        if (activeTasks.Count == 0)
+        {
+            return;
+        }
 
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        
-        // 倒序遍历，方便在乱序完成后安全移除元素
+        System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+
         for (int i = activeTasks.Count - 1; i >= 0; i--)
         {
-            // 单帧预算控制：如果解析耗时超过 4ms（约占 16ms 预算的 25%），立刻截断，留到下一帧，保证高帧率平滑
-            if (sw.ElapsedMilliseconds > 4) break;
+            if (sw.ElapsedMilliseconds > 4)
+            {
+                break;
+            }
 
             PendingSliceTask task = activeTasks[i];
 
             if (task.State == 0)
             {
-                if (task.MainJobHandle.IsCompleted)
+                if (!task.MainJobHandle.IsCompleted)
                 {
-                    try
-                    {
-                        task.MainJobHandle.Complete();
-                    }
-                    catch (System.Exception e)
-                    {
-                        Debug.LogError($"[SlicerTaskManager] Phase 0 Job Error: {e.Message}\n{e.StackTrace}");
-                        activeTasks.RemoveAt(i);
-                        if (task.IsCurve && task.CurveCutPathArray.IsCreated) task.CurveCutPathArray.Dispose();
-                        SliceContextPool.Return(task.Context);
-                        continue;
-                    }
-
-                    activeTasks.RemoveAt(i);
-                    
-                    if (task.Target == null || !task.Target.activeInHierarchy)
-                    {
-                        if (task.IsCurve && task.CurveCutPathArray.IsCreated) task.CurveCutPathArray.Dispose();
-                        SliceContextPool.Return(task.Context);
-                        continue;
-                    }
-
-                    // Setup UV Rect before phase 6
-                    task.Context.UVRect = new float4(task.UVReferenceRect.xMin, task.UVReferenceRect.yMin, task.UVReferenceRect.width, task.UVReferenceRect.height);
-                    
-                    // NativeStream 创建 (上界为 LoopRanges.Length)
-                    int loopCount = task.Context.LoopRanges.Length;
-                    task.Context.MeshDataStream = new Unity.Collections.NativeStream(loopCount, Unity.Collections.Allocator.TempJob);
-                    task.Context.MeshDataArray = UnityEngine.Mesh.AllocateWritableMeshData(loopCount);
-
-                    // 调度 Phase 6
-                    JobHandle prepHandle = new SlicerCore.BuildSolidHoleMapJob
-                    {
-                        LoopRanges = task.Context.LoopRanges,
-                        LoopTypes = task.Context.LoopTypes,
-                        HoleParents = task.Context.HoleParents,
-                        SolidHoleMap = task.Context.SolidHoleMap,
-                        HoleRangeBuffer = task.Context.HoleRangeBuffer
-                    }.Schedule();
-
-                    JobHandle mergeHandle = new SlicerCore.MergeTriangulateJob
-                    {
-                        FlattenedLoops = task.Context.FlattenedLoops.AsArray(),
-                        LoopRanges = task.Context.LoopRanges.AsArray(),
-                        LoopTypes = task.Context.LoopTypes.AsArray(),
-                        SolidHoleMap = task.Context.SolidHoleMap.AsDeferredJobArray(),
-                        HoleRangeBuffer = task.Context.HoleRangeBuffer.AsDeferredJobArray(),
-                        UVRect = task.Context.UVRect,
-                        MeshDataWriter = task.Context.MeshDataStream.AsWriter()
-                    }.Schedule(loopCount, 1, prepHandle);
-
-                    JobHandle buildMeshHandle = new SlicerCore.BuildMeshDataJob
-                    {
-                        StreamReader = task.Context.MeshDataStream.AsReader(),
-                        MeshDataArray = task.Context.MeshDataArray
-                    }.Schedule(loopCount, 1, mergeHandle);
-
-                    task.MainJobHandle = buildMeshHandle;
-                    task.State = 1;
-                    activeTasks.Add(task); // Re-enqueue for Phase 6
+                    continue;
                 }
+
+                activeTasks.RemoveAt(i);
+
+                try
+                {
+                    task.MainJobHandle.Complete();
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"[SlicerTaskManager] Phase 0 Job Error: {e.Message}\n{e.StackTrace}");
+                    CleanupTask(task, disposeMeshDataArray: false);
+                    continue;
+                }
+
+                if (!IsTaskTargetStillValid(task))
+                {
+                    CleanupTask(task, disposeMeshDataArray: false);
+                    continue;
+                }
+
+                task.Context.UVRect = new float4(task.UVReferenceRect.xMin, task.UVReferenceRect.yMin, task.UVReferenceRect.width, task.UVReferenceRect.height);
+
+                int loopCount = task.Context.LoopRanges.Length;
+                task.Context.MeshDataStream = new Unity.Collections.NativeStream(loopCount, Unity.Collections.Allocator.TempJob);
+                task.Context.MeshDataArray = Mesh.AllocateWritableMeshData(loopCount);
+
+                JobHandle prepHandle = new SlicerCore.BuildSolidHoleMapJob
+                {
+                    LoopRanges = task.Context.LoopRanges,
+                    LoopTypes = task.Context.LoopTypes,
+                    HoleParents = task.Context.HoleParents,
+                    SolidHoleMap = task.Context.SolidHoleMap,
+                    HoleRangeBuffer = task.Context.HoleRangeBuffer
+                }.Schedule();
+
+                JobHandle mergeHandle = new SlicerCore.MergeTriangulateJob
+                {
+                    FlattenedLoops = task.Context.FlattenedLoops.AsArray(),
+                    LoopRanges = task.Context.LoopRanges.AsArray(),
+                    LoopTypes = task.Context.LoopTypes.AsArray(),
+                    SolidHoleMap = task.Context.SolidHoleMap.AsDeferredJobArray(),
+                    HoleRangeBuffer = task.Context.HoleRangeBuffer.AsDeferredJobArray(),
+                    UVRect = task.Context.UVRect,
+                    MeshDataWriter = task.Context.MeshDataStream.AsWriter()
+                }.Schedule(loopCount, 1, prepHandle);
+
+                JobHandle buildMeshHandle = new SlicerCore.BuildMeshDataJob
+                {
+                    StreamReader = task.Context.MeshDataStream.AsReader(),
+                    MeshDataArray = task.Context.MeshDataArray
+                }.Schedule(loopCount, 1, mergeHandle);
+
+                task.MainJobHandle = buildMeshHandle;
+                task.State = 1;
+                activeTasks.Add(task);
             }
             else if (task.State == 1)
             {
-                if (task.MainJobHandle.IsCompleted)
+                if (!task.MainJobHandle.IsCompleted)
                 {
-                    try
-                    {
-                        task.MainJobHandle.Complete();
-                    }
-                    catch (System.Exception e)
-                    {
-                        Debug.LogError($"[SlicerTaskManager] Phase 1 Job Error: {e.Message}\n{e.StackTrace}");
-                        activeTasks.RemoveAt(i);
-                        if (task.IsCurve && task.CurveCutPathArray.IsCreated) task.CurveCutPathArray.Dispose();
-                        SliceContextPool.Return(task.Context);
-                        continue;
-                    }
-
-                    activeTasks.RemoveAt(i);
-
-                    if (task.IsCurve && task.CurveCutPathArray.IsCreated)
-                    {
-                        task.CurveCutPathArray.Dispose();
-                    }
-
-                    if (task.Target == null)
-                    {
-                        SliceContextPool.Return(task.Context);
-                        continue;
-                    }
-
-                    ProcessTaskResolve(task);
+                    continue;
                 }
+
+                activeTasks.RemoveAt(i);
+
+                try
+                {
+                    task.MainJobHandle.Complete();
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"[SlicerTaskManager] Phase 1 Job Error: {e.Message}\n{e.StackTrace}");
+                    CleanupTask(task, disposeMeshDataArray: true);
+                    continue;
+                }
+
+                if (!IsTaskTargetStillValid(task))
+                {
+                    CleanupTask(task, disposeMeshDataArray: true);
+                    continue;
+                }
+
+                ProcessTaskResolve(task);
             }
         }
+
         sw.Stop();
     }
 
     private void ProcessTaskResolve(PendingSliceTask task)
     {
         Mesh[] resultMeshes = null;
-        try 
+        PooledSlicePiece[] rentedPieces = null;
+        bool createdAny = false;
+
+        try
         {
-            var originalRb = task.Target.GetComponent<Rigidbody2D>();
-            var meshRenderer = task.Target.GetComponent<MeshRenderer>();
-            var mat = meshRenderer != null ? meshRenderer.sharedMaterial : null;
+            if (!IsTaskTargetStillValid(task))
+            {
+                DisposeMeshDataArray(ref task);
+                return;
+            }
+
+            Rigidbody2D originalRb = task.Target.GetComponent<Rigidbody2D>();
+            MeshRenderer meshRenderer = task.Target.GetComponent<MeshRenderer>();
+            Material mat = meshRenderer != null ? meshRenderer.sharedMaterial : null;
 
             int loopCount = task.Context.LoopRanges.Length;
-            bool createdAny = false;
+            resultMeshes = SliceMeshArrayPool.Rent(loopCount);
+            rentedPieces = ArrayPool<PooledSlicePiece>.Shared.Rent(loopCount);
 
-            resultMeshes = new Mesh[loopCount];
-            for (int i = 0; i < loopCount; i++) resultMeshes[i] = new Mesh();
+            for (int i = 0; i < loopCount; i++)
+            {
+                PooledSlicePiece piece = SlicePiecePool.Instance.Rent();
+                rentedPieces[i] = piece;
+                resultMeshes[i] = piece.ReusableMesh;
+            }
 
-            // 一次性零 GC 提交给 Unity 底层
-            // 【修复 3】追加 Flags，配合我们自己的 Mesh.bounds 手动赋值，达成极致 0 GC + 0 重算
-            Mesh.ApplyAndDisposeWritableMeshData(task.Context.MeshDataArray, resultMeshes, 
+            Mesh.ApplyAndDisposeWritableMeshData(
+                task.Context.MeshDataArray,
+                resultMeshes,
                 UnityEngine.Rendering.MeshUpdateFlags.DontRecalculateBounds | UnityEngine.Rendering.MeshUpdateFlags.DontValidateIndices);
-            
-            // 标记已销毁，防止 SliceContext 回收时再次 Dispose
+
             task.Context.MeshDataArray = default;
 
             for (int i = 0; i < loopCount; i++)
             {
+                PooledSlicePiece piece = rentedPieces[i];
                 Mesh mesh = resultMeshes[i];
-                if (mesh.vertexCount == 0)
+
+                if (piece == null || mesh == null || mesh.vertexCount == 0)
                 {
-                    Destroy(mesh);
+                    if (piece != null)
+                    {
+                        piece.RequestDespawn();
+                        rentedPieces[i] = null;
+                    }
+
                     continue;
                 }
 
-                // 直接利用 Phase 5 计算好的 Bounds
                 float4 boundsInfo = task.Context.LoopBounds[i];
                 mesh.bounds = new Bounds(
-                    new Vector3((boundsInfo.x + boundsInfo.z) * 0.5f, (boundsInfo.y + boundsInfo.w) * 0.5f, 0f), 
+                    new Vector3((boundsInfo.x + boundsInfo.z) * 0.5f, (boundsInfo.y + boundsInfo.w) * 0.5f, 0f),
                     new Vector3(boundsInfo.z - boundsInfo.x, boundsInfo.w - boundsInfo.y, 0.1f));
 
-                // Build Collider Paths from original loops
                 int2 outerRange = task.Context.LoopRanges[i];
                 int2 holeData = task.Context.SolidHoleMap[i];
                 float area = task.Context.LoopAreas[i];
 
-                Slicer.CreateSlicedObjectFromMesh(task.Target, mat, originalRb, task.UVReferenceRect, task.Context, mesh, outerRange, holeData, area);
+                bool success = Slicer.CreateSlicedObjectFromMesh(
+                    piece,
+                    task.Target,
+                    mat,
+                    originalRb,
+                    task.UVReferenceRect,
+                    task.Context,
+                    mesh,
+                    outerRange,
+                    holeData,
+                    area);
+
+                if (!success)
+                {
+                    piece.RequestDespawn();
+                    rentedPieces[i] = null;
+                    continue;
+                }
+
+                rentedPieces[i] = null;
                 createdAny = true;
             }
 
             if (createdAny)
             {
-                Destroy(task.Target); 
+                RecycleOrDestroyTarget(task);
             }
         }
-        catch (System.Exception e)
+        catch (Exception e)
         {
             Debug.LogError($"[SlicerTaskManager] Execution Error: {e.Message}\n{e.StackTrace}");
-            // 如果出错，销毁那些还没来得及处理的 mesh 以防泄漏
-            if (resultMeshes != null)
-            {
-                for (int i = 0; i < resultMeshes.Length; i++)
-                {
-                    if (resultMeshes[i] != null) Destroy(resultMeshes[i]);
-                }
-            }
+            DisposeMeshDataArray(ref task);
         }
         finally
         {
-            SliceContextPool.Return(task.Context);
+            if (rentedPieces != null)
+            {
+                for (int i = 0; i < rentedPieces.Length; i++)
+                {
+                    if (rentedPieces[i] != null)
+                    {
+                        rentedPieces[i].RequestDespawn();
+                    }
+                }
+
+                ArrayPool<PooledSlicePiece>.Shared.Return(rentedPieces, clearArray: true);
+            }
+
+            if (resultMeshes != null)
+            {
+                SliceMeshArrayPool.Return(resultMeshes);
+            }
+
+            CleanupTask(task, disposeMeshDataArray: false);
+        }
+    }
+
+    private void CleanupTask(PendingSliceTask task, bool disposeMeshDataArray)
+    {
+        DisposeCurveCutPath(ref task);
+
+        if (disposeMeshDataArray)
+        {
+            DisposeMeshDataArray(ref task);
+        }
+
+        ReleaseTaskReservation(task);
+        SliceContextPool.Return(task.Context);
+    }
+
+    private static bool IsTaskTargetStillValid(PendingSliceTask task)
+    {
+        if (task.Target == null || !task.Target.activeInHierarchy)
+        {
+            return false;
+        }
+
+        if (task.TargetPiece == null)
+        {
+            return true;
+        }
+
+        return task.TargetPiece.SpawnVersion == task.TargetVersion;
+    }
+
+    private static void DisposeCurveCutPath(ref PendingSliceTask task)
+    {
+        if (task.IsCurve && task.CurveCutPathArray.IsCreated)
+        {
+            task.CurveCutPathArray.Dispose();
+            task.CurveCutPathArray = default;
+        }
+    }
+
+    private static void DisposeMeshDataArray(ref PendingSliceTask task)
+    {
+        if (task.Context.MeshDataArray.Length > 0)
+        {
+            task.Context.MeshDataArray.Dispose();
+            task.Context.MeshDataArray = default;
+        }
+    }
+
+    private static void ReleaseTaskReservation(PendingSliceTask task)
+    {
+        if (task.TargetPiece != null)
+        {
+            task.TargetPiece.ReleaseTaskReservation();
+        }
+    }
+
+    private static void RecycleOrDestroyTarget(PendingSliceTask task)
+    {
+        if (task.TargetPiece != null)
+        {
+            task.TargetPiece.RequestDespawn();
+        }
+        else if (task.Target != null)
+        {
+            Destroy(task.Target);
         }
     }
 }

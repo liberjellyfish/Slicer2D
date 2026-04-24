@@ -114,7 +114,7 @@ public class SliceableGenerator : MonoBehaviour
             Material mat = new Material(shader);
             mat.mainTexture = spriteTexture;
             mat.color = spriteColor;
-            mr.material = mat;
+            mr.sharedMaterial = mat;
         }
 
         Rigidbody2D rb = GetComponent<Rigidbody2D>();

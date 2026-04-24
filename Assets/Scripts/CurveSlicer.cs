@@ -199,6 +199,7 @@ public static class CurveSlicer
             nativeCutPath,
             context
         );
+        PooledSlicePiece targetPiece = Slicer.CaptureTaskLease(target, out int targetVersion);
 
         PendingSliceTask task = new PendingSliceTask
         {
@@ -208,7 +209,9 @@ public static class CurveSlicer
             UVReferenceRect = referenceRect,
             MainJobHandle = handle,
             CurveCutPathArray = nativeCutPath,
-            IsCurve = true
+            IsCurve = true,
+            TargetPiece = targetPiece,
+            TargetVersion = targetVersion
         };
 
         // 解放主线程：把返回凭证塞进任务中心轮询
@@ -348,6 +351,8 @@ public static class CurveSlicer
             NativeData = nativeData,
             UVReferenceRect = referenceRect,
             MainJobHandle = classifyHandle,
+            TargetPiece = Slicer.CaptureTaskLease(target, out int targetVersion),
+            TargetVersion = targetVersion,
             IsCurve = true,
             IsPureHolePunch = true // 状态机硬隔离
         };

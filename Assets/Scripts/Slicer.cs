@@ -1,55 +1,57 @@
-using UnityEngine;
 using System.Collections.Generic;
 using Unity.Collections;
 using Unity.Mathematics;
+using UnityEngine;
 
 public static class Slicer
 {
     public static void Slice(GameObject target, Vector3 worldStart, Vector3 worldEnd)
     {
-        // 1. 获取 Unity 组件数据
         PolygonCollider2D polyCollider = target.GetComponent<PolygonCollider2D>();
         MeshRenderer meshRenderer = target.GetComponent<MeshRenderer>();
-        Rigidbody2D originalRb = target.GetComponent<Rigidbody2D>();
-        if (polyCollider == null || meshRenderer == null) return;
+        if (polyCollider == null || meshRenderer == null)
+        {
+            return;
+        }
 
-        // 2. 坐标转换与准备
         Rect referenceRect;
-        var generator = target.GetComponent<SliceableGenerator>();
-        if (generator != null && generator.hasUVReference) referenceRect = generator.uvReferenceRect;
-        else referenceRect = CalculateLocalBounds(polyCollider);
+        SliceableGenerator generator = target.GetComponent<SliceableGenerator>();
+        if (generator != null && generator.hasUVReference)
+        {
+            referenceRect = generator.uvReferenceRect;
+        }
+        else
+        {
+            referenceRect = CalculateLocalBounds(polyCollider);
+        }
 
         Vector2 localSliceStart = target.transform.InverseTransformPoint(worldStart);
         Vector2 localSliceEnd = target.transform.InverseTransformPoint(worldEnd);
         Vector2 cutDirection = (localSliceEnd - localSliceStart).normalized;
-        if (cutDirection == Vector2.zero) return;
+        if (cutDirection == Vector2.zero)
+        {
+            return;
+        }
 
-        // 延长切割线
         float extensionLength = Mathf.Max(referenceRect.width, referenceRect.height) * 1.5f + 1.0f;
-        localSliceStart = localSliceStart - cutDirection * extensionLength;
-        localSliceEnd = localSliceEnd + cutDirection * extensionLength;
+        localSliceStart -= cutDirection * extensionLength;
+        localSliceEnd += cutDirection * extensionLength;
 
-        // --- Phase 1 引流：立即排期切割 Job，将依赖句柄送入队列做跨帧轮询 ---
-        
-        // 获取或注入 Native 数据中间件
         SliceableNativeData nativeData = target.GetComponent<SliceableNativeData>();
         if (nativeData == null)
         {
-            // 添加组件时会自动触发其 Awake() 进行唯一一次数据缓存提取
-            nativeData = target.AddComponent<SliceableNativeData>(); 
+            nativeData = target.AddComponent<SliceableNativeData>();
         }
 
-        // 从池中提取 Context 令牌
         SliceContext context = SliceContextPool.Get();
-
-        // 立刻发车到底层 Burst 线程池
         Unity.Jobs.JobHandle handle = SlicerCore.ScheduleSliceJob(
             nativeData.CachedVertices,
             nativeData.CachedPathRanges,
             localSliceStart,
             localSliceEnd,
-            context
-        );
+            context);
+
+        PooledSlicePiece targetPiece = CaptureTaskLease(target, out int targetVersion);
 
         PendingSliceTask task = new PendingSliceTask
         {
@@ -58,24 +60,25 @@ public static class Slicer
             NativeData = nativeData,
             UVReferenceRect = referenceRect,
             MainJobHandle = handle,
-            IsCurve = false
+            IsCurve = false,
+            TargetPiece = targetPiece,
+            TargetVersion = targetVersion
         };
 
-        // 提交跨帧任务队列，彻底解耦调用。在队列后续执行完前，不再阻断主帧。
         SlicerTaskManager.Instance.Enqueue(task);
     }
 
-
-
     internal static Rect CalculateLocalBounds(PolygonCollider2D col)
     {
-        // 逻辑不变...
-        float minX = float.MaxValue, minY = float.MaxValue;
-        float maxX = float.MinValue, maxY = float.MinValue;
+        float minX = float.MaxValue;
+        float minY = float.MaxValue;
+        float maxX = float.MinValue;
+        float maxY = float.MinValue;
+
         for (int i = 0; i < col.pathCount; i++)
         {
             Vector2[] path = col.GetPath(i);
-            foreach (var p in path)
+            foreach (Vector2 p in path)
             {
                 if (p.x < minX) minX = p.x;
                 if (p.x > maxX) maxX = p.x;
@@ -83,6 +86,7 @@ public static class Slicer
                 if (p.y > maxY) maxY = p.y;
             }
         }
+
         return new Rect(minX, minY, maxX - minX, maxY - minY);
     }
 
@@ -95,7 +99,6 @@ public static class Slicer
         newObj.layer = originalTemplate.layer;
         newObj.tag = originalTemplate.tag;
 
-        // Phase C-1: 判断走 Native 零拷贝路径还是旧托管路径
         bool useNativePath = nativeCtx != null && data.NativeOuterRange.y > 0;
 
         int vertCount;
@@ -113,18 +116,16 @@ public static class Slicer
 
         try
         {
-            List<Vector2> mergedVertices = null; // 仅旧路径使用
+            List<Vector2> mergedVertices = null;
 
             if (useNativePath)
             {
-                // ★ Native 零拷贝路径：从 FlattenedLoops 直接读取，不经过 List<Vector2>
                 flatLoops = nativeCtx.FlattenedLoops.AsArray();
                 mergedNative = PolygonHoleMerger.MergeNative(flatLoops, data.NativeOuterRange, data.NativeHoleRanges);
 
                 vertCount = mergedNative.Length;
                 vertices3D = new Vector3[vertCount];
                 uvs = new Vector2[vertCount];
-                // Phase C-2: 不再分配 new Vector2[vertCount] — 直接走 TriangulateNative
 
                 for (int i = 0; i < vertCount; i++)
                 {
@@ -135,7 +136,6 @@ public static class Slicer
             }
             else
             {
-                // ★ 旧托管路径回退（CurveSlicer.PerformHolePunch 等无 nativeCtx 的调用）
                 mergedVertices = PolygonHoleMerger.Merge(data.OuterLoop, data.Holes);
 
                 vertCount = mergedVertices.Count;
@@ -149,17 +149,14 @@ public static class Slicer
                 }
             }
 
-            // Phase C-2: 三角剖分分流
             int[] indices;
             if (useNativePath)
             {
-                // ★ Native 路径：MergeNative 输出直通 TriangulateNative，零中间分配
                 nativeIndices = Triangulator.TriangulateNative(mergedNative);
                 indices = nativeIndices.AsArray().ToArray();
             }
             else
             {
-                // 旧路径：仍需 Vector2[] 给 Triangulate
                 Vector2[] vertices2D = mergedVertices.ToArray();
                 indices = Triangulator.Triangulate(vertices2D);
             }
@@ -168,27 +165,29 @@ public static class Slicer
             mesh.vertices = vertices3D;
             mesh.uv = uvs;
             mesh.triangles = indices;
-            // 2D 场景法线恒定为 (0,0,-1)，硬编码跳过 RecalculateNormals 的全 mesh 叉积遍历
+
             Vector3[] normals = new Vector3[vertices3D.Length];
-            for (int i = 0; i < normals.Length; i++) normals[i] = new Vector3(0, 0, -1);
+            for (int i = 0; i < normals.Length; i++)
+            {
+                normals[i] = new Vector3(0, 0, -1);
+            }
+
             mesh.normals = normals;
             mesh.RecalculateBounds();
 
             MeshFilter mf = newObj.AddComponent<MeshFilter>();
-            mf.mesh = mesh;
+            mf.sharedMesh = mesh;
             MeshRenderer mr = newObj.AddComponent<MeshRenderer>();
-            mr.material = mat;
+            mr.sharedMaterial = mat;
 
-            // --- 碰撞体设置 ---
             PolygonCollider2D pc = newObj.AddComponent<PolygonCollider2D>();
-            pc.enabled = false; // 延迟物理重建：批量设完后再启用
+            pc.enabled = false;
 
             if (useNativePath)
             {
-                pc.pathCount = 0; // Guard against Awake GC
+                pc.pathCount = 0;
                 int holeCount = data.NativeHoleRanges != null ? data.NativeHoleRanges.Count : 0;
 
-                // --- Start B-2 Injection ---
                 int totalVerts = data.NativeOuterRange.y;
                 for (int i = 0; i < holeCount; i++)
                 {
@@ -197,6 +196,8 @@ public static class Slicer
 
                 NativeArray<float2> newVertices = default;
                 NativeArray<int2> newPathRanges = default;
+                NativeArray<float2> colliderVertices = default;
+                NativeArray<int2> colliderRanges = default;
 
                 try
                 {
@@ -216,27 +217,32 @@ public static class Slicer
                         currentOffset += holeRange.y;
                     }
 
-                    // Guard against Awake GC exactly here, explicitly setting 0 overrides any auto-generation
                     pc.pathCount = 0;
                     SliceableNativeData nativeData = newObj.AddComponent<SliceableNativeData>();
                     nativeData.InitFromNative(newVertices, newPathRanges);
+                    colliderVertices = newVertices;
+                    colliderRanges = newPathRanges;
+                    newVertices = default;
+                    newPathRanges = default;
 
-                    // --- Start B-3 Fallback (O(N) CPU, Zero GC) ---
                     pc.pathCount = 1 + holeCount;
                     List<Vector2> tempPathList = nativeCtx.GetList();
-                    
-                    FillListFromPersistentRange(tempPathList, newVertices, newPathRanges[0].x, newPathRanges[0].y);
-                    pc.SetPath(0, tempPathList);
-                    
-                    for (int i = 0; i < holeCount; i++)
+                    try
                     {
-                        int2 currentRange = newPathRanges[1 + i];
-                        FillListFromPersistentRange(tempPathList, newVertices, currentRange.x, currentRange.y);
-                        pc.SetPath(i + 1, tempPathList);
+                        FillListFromPersistentRange(tempPathList, colliderVertices, colliderRanges[0].x, colliderRanges[0].y);
+                        pc.SetPath(0, tempPathList);
+
+                        for (int i = 0; i < holeCount; i++)
+                        {
+                            int2 currentRange = colliderRanges[1 + i];
+                            FillListFromPersistentRange(tempPathList, colliderVertices, currentRange.x, currentRange.y);
+                            pc.SetPath(i + 1, tempPathList);
+                        }
                     }
-                    
-                    nativeCtx.ReturnList(tempPathList);
-                    // --- End B-3 Fallback ---
+                    finally
+                    {
+                        nativeCtx.ReturnList(tempPathList);
+                    }
                 }
                 catch (System.Exception e)
                 {
@@ -244,11 +250,9 @@ public static class Slicer
                     if (newPathRanges.IsCreated) newPathRanges.Dispose();
                     Debug.LogError($"[Slicer] NativeData Injection Error: {e.Message}");
                 }
-                // --- End B-2 Injection ---
             }
             else
             {
-                // 旧路径
                 pc.pathCount = 1 + data.Holes.Count;
                 pc.SetPath(0, data.OuterLoop);
                 for (int i = 0; i < data.Holes.Count; i++)
@@ -257,7 +261,7 @@ public static class Slicer
                 }
             }
 
-            pc.enabled = true; // 统一触发一次物理重建
+            pc.enabled = true;
 
             SliceableGenerator newGen = newObj.AddComponent<SliceableGenerator>();
             newGen.hasUVReference = true;
@@ -267,8 +271,6 @@ public static class Slicer
             if (originalRb != null)
             {
                 Rigidbody2D newRb = newObj.AddComponent<Rigidbody2D>();
-                newRb.mass = originalRb.mass * (data.Area / 10f);
-                newRb.useAutoMass = true;
                 newRb.linearDamping = originalRb.linearDamping;
                 newRb.angularDamping = originalRb.angularDamping;
                 newRb.gravityScale = originalRb.gravityScale;
@@ -277,6 +279,7 @@ public static class Slicer
                 newRb.sharedMaterial = originalRb.sharedMaterial;
                 newRb.linearVelocity = originalRb.linearVelocity;
                 newRb.angularVelocity = originalRb.angularVelocity;
+                ApplyMassSettings(newRb, originalRb, data.Area);
             }
         }
         finally
@@ -286,39 +289,35 @@ public static class Slicer
         }
     }
 
-    /// <summary>
-    /// Phase 6: 从 NativeStream 输出直接重构对象（代替原有基于 PolygonData 的方案）
-    /// </summary>
-    public static void CreateSlicedObjectFromMesh(
-        GameObject originalObj, 
-        Material mat, 
-        Rigidbody2D originalRb, 
+    public static bool CreateSlicedObjectFromMesh(
+        PooledSlicePiece piece,
+        GameObject originalObj,
+        Material mat,
+        Rigidbody2D originalRb,
         Rect uvRefRect,
         SliceContext nativeCtx,
         Mesh mesh,
-        int2 outerRange, 
+        int2 outerRange,
         int2 holeData,
         float area)
     {
-        GameObject newObj = new GameObject(originalObj.name + "_Slice");
-        newObj.transform.position = originalObj.transform.position;
-        newObj.transform.rotation = originalObj.transform.rotation;
-        newObj.transform.localScale = originalObj.transform.localScale;
-        newObj.layer = originalObj.layer;
-        newObj.tag = originalObj.tag;
+        if (piece == null || originalObj == null || nativeCtx == null || mesh == null)
+        {
+            return false;
+        }
 
-        MeshFilter mf = newObj.AddComponent<MeshFilter>();
-        mf.mesh = mesh;
-        MeshRenderer mr = newObj.AddComponent<MeshRenderer>();
-        mr.material = mat;
+        piece.PrepareForSpawn(originalObj, mat, originalRb, uvRefRect);
 
-        PolygonCollider2D pc = newObj.AddComponent<PolygonCollider2D>();
-        pc.enabled = false;
-        pc.pathCount = 0; // Guard against Awake GC
+        MeshFilter mf = piece.MeshFilter;
+        MeshRenderer mr = piece.MeshRenderer;
+        PolygonCollider2D pc = piece.PolygonCollider;
+        SliceableNativeData nativeData = piece.SliceableNativeData;
+        Rigidbody2D rb = piece.Rigidbody2D;
+
+        mf.sharedMesh = mesh;
+        mr.sharedMaterial = mat;
 
         NativeArray<float2> flatLoops = nativeCtx.FlattenedLoops.AsArray();
-
-        // --- Start B-2 Injection ---
         int totalVerts = outerRange.y;
         for (int i = 0; i < holeData.y; i++)
         {
@@ -327,6 +326,8 @@ public static class Slicer
 
         NativeArray<float2> newVertices = default;
         NativeArray<int2> newPathRanges = default;
+        NativeArray<float2> colliderVertices = default;
+        NativeArray<int2> colliderRanges = default;
 
         try
         {
@@ -334,12 +335,10 @@ public static class Slicer
             newPathRanges = new NativeArray<int2>(1 + holeData.y, Allocator.Persistent);
 
             int currentOffset = 0;
-            // Outer loop
             NativeArray<float2>.Copy(flatLoops, outerRange.x, newVertices, currentOffset, outerRange.y);
             newPathRanges[0] = new int2(currentOffset, outerRange.y);
             currentOffset += outerRange.y;
 
-            // Hole loops
             for (int i = 0; i < holeData.y; i++)
             {
                 int2 holeRange = nativeCtx.HoleRangeBuffer[holeData.x + i];
@@ -348,70 +347,100 @@ public static class Slicer
                 currentOffset += holeRange.y;
             }
 
-            // Guard against Awake GC exactly here
-            pc.pathCount = 0; 
-            SliceableNativeData nativeData = newObj.AddComponent<SliceableNativeData>();
+            pc.pathCount = 0;
             nativeData.InitFromNative(newVertices, newPathRanges);
+            colliderVertices = newVertices;
+            colliderRanges = newPathRanges;
+            newVertices = default;
+            newPathRanges = default;
 
-            // --- Start B-3 Fallback (O(N) CPU, Zero GC) ---
             pc.pathCount = 1 + holeData.y;
             List<Vector2> tempPathList = nativeCtx.GetList();
-
-            FillListFromPersistentRange(tempPathList, newVertices, newPathRanges[0].x, newPathRanges[0].y);
-            pc.SetPath(0, tempPathList);
-
-            for (int i = 0; i < holeData.y; i++)
+            try
             {
-                int2 currentRange = newPathRanges[1 + i];
-                FillListFromPersistentRange(tempPathList, newVertices, currentRange.x, currentRange.y);
-                pc.SetPath(i + 1, tempPathList);
-            }
+                FillListFromPersistentRange(tempPathList, colliderVertices, colliderRanges[0].x, colliderRanges[0].y);
+                pc.SetPath(0, tempPathList);
 
-            nativeCtx.ReturnList(tempPathList);
-            // --- End B-3 Fallback ---
+                for (int i = 0; i < holeData.y; i++)
+                {
+                    int2 currentRange = colliderRanges[1 + i];
+                    FillListFromPersistentRange(tempPathList, colliderVertices, currentRange.x, currentRange.y);
+                    pc.SetPath(i + 1, tempPathList);
+                }
+            }
+            finally
+            {
+                nativeCtx.ReturnList(tempPathList);
+            }
         }
         catch (System.Exception e)
         {
             if (newVertices.IsCreated) newVertices.Dispose();
             if (newPathRanges.IsCreated) newPathRanges.Dispose();
             Debug.LogError($"[Slicer] NativeData Injection Error: {e.Message}");
+            return false;
         }
-        // --- End B-2 Injection ---
-        
-        pc.enabled = true;
-
-        SliceableGenerator newGen = newObj.AddComponent<SliceableGenerator>();
-        newGen.hasUVReference = true;
-        newGen.uvReferenceRect = uvRefRect;
-        newGen.autoGenerateOnStart = false;
 
         if (originalRb != null)
         {
-            Rigidbody2D newRb = newObj.AddComponent<Rigidbody2D>();
-            newRb.mass = originalRb.mass * (area / 10f); // 保持原有的简单比例计算
-            newRb.useAutoMass = true;
-            newRb.linearDamping = originalRb.linearDamping;
-            newRb.angularDamping = originalRb.angularDamping;
-            newRb.gravityScale = originalRb.gravityScale;
-            newRb.collisionDetectionMode = originalRb.collisionDetectionMode;
-            newRb.interpolation = originalRb.interpolation;
-            newRb.sharedMaterial = originalRb.sharedMaterial;
-            newRb.linearVelocity = originalRb.linearVelocity;
-            newRb.angularVelocity = originalRb.angularVelocity;
+            rb.linearDamping = originalRb.linearDamping;
+            rb.angularDamping = originalRb.angularDamping;
+            rb.gravityScale = originalRb.gravityScale;
+            rb.collisionDetectionMode = originalRb.collisionDetectionMode;
+            rb.interpolation = originalRb.interpolation;
+            rb.sharedMaterial = originalRb.sharedMaterial;
+            rb.linearVelocity = originalRb.linearVelocity;
+            rb.angularVelocity = originalRb.angularVelocity;
+            ApplyMassSettings(rb, originalRb, area);
         }
+
+        piece.CompleteSpawn(originalRb != null);
+        return true;
     }
 
-    /// <summary>
-    /// 从 Persistent NativeArray 极速填充池化 List（零分配 GC，用于 PolygonCollider2D.SetPath 回退）
-    /// </summary>
+    internal static PooledSlicePiece CaptureTaskLease(GameObject target, out int targetVersion)
+    {
+        PooledSlicePiece targetPiece = target != null ? target.GetComponent<PooledSlicePiece>() : null;
+        if (targetPiece != null)
+        {
+            targetPiece.RetainForTask();
+            targetVersion = targetPiece.SpawnVersion;
+            return targetPiece;
+        }
+
+        targetVersion = 0;
+        return null;
+    }
+
     private static void FillListFromPersistentRange(List<Vector2> list, NativeArray<float2> vertices, int start, int count)
     {
         list.Clear();
-        if (list.Capacity < count) list.Capacity = count;
+        if (list.Capacity < count)
+        {
+            list.Capacity = count;
+        }
+
         for (int i = 0; i < count; i++)
         {
             float2 v = vertices[start + i];
             list.Add(new Vector2(v.x, v.y));
         }
+    }
+
+    private static void ApplyMassSettings(Rigidbody2D targetRb, Rigidbody2D sourceRb, float area)
+    {
+        if (targetRb == null || sourceRb == null)
+        {
+            return;
+        }
+
+        if (sourceRb.useAutoMass)
+        {
+            targetRb.useAutoMass = true;
+            return;
+        }
+
+        targetRb.useAutoMass = false;
+        targetRb.mass = sourceRb.mass * (area / 10f);
     }
 }
