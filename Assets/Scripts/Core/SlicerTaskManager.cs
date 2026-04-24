@@ -57,6 +57,35 @@ public class SlicerTaskManager : MonoBehaviour
 
         System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
 
+        // 优先消费已经完成 Mesh Build 的任务，减少跨帧积压。
+        ProcessCompletedStateOneTasks(sw);
+        ProcessRemainingTasks(sw);
+
+        sw.Stop();
+    }
+
+    private void ProcessCompletedStateOneTasks(System.Diagnostics.Stopwatch sw)
+    {
+        for (int i = activeTasks.Count - 1; i >= 0; i--)
+        {
+            if (sw.ElapsedMilliseconds > 4)
+            {
+                break;
+            }
+
+            PendingSliceTask task = activeTasks[i];
+            if (task.State != 1 || !task.MainJobHandle.IsCompleted)
+            {
+                continue;
+            }
+
+            activeTasks.RemoveAt(i);
+            FinalizeStateOneTask(task);
+        }
+    }
+
+    private void ProcessRemainingTasks(System.Diagnostics.Stopwatch sw)
+    {
         for (int i = activeTasks.Count - 1; i >= 0; i--)
         {
             if (sw.ElapsedMilliseconds > 4)
@@ -95,12 +124,7 @@ public class SlicerTaskManager : MonoBehaviour
                 task.Context.UVRect = new float4(task.UVReferenceRect.xMin, task.UVReferenceRect.yMin, task.UVReferenceRect.width, task.UVReferenceRect.height);
 
                 int loopCount = task.Context.LoopRanges.Length;
-                task.Context.MeshDataStream = new Unity.Collections.NativeStream(loopCount, Unity.Collections.Allocator.TempJob);
-                task.Context.MeshDataArray = Mesh.AllocateWritableMeshData(loopCount);
-                task.Context.LoopPhysicsData = new Unity.Collections.NativeArray<SlicerCore.FragmentPhysicsData>(
-                    loopCount,
-                    Unity.Collections.Allocator.Persistent,
-                    Unity.Collections.NativeArrayOptions.ClearMemory);
+                PreparePhaseSixResources(ref task, loopCount);
 
                 JobHandle prepHandle = new SlicerCore.BuildSolidHoleMapJob
                 {
@@ -142,29 +166,59 @@ public class SlicerTaskManager : MonoBehaviour
                 }
 
                 activeTasks.RemoveAt(i);
-
-                try
-                {
-                    task.MainJobHandle.Complete();
-                }
-                catch (Exception e)
-                {
-                    Debug.LogError($"[SlicerTaskManager] Phase 1 Job Error: {e.Message}\n{e.StackTrace}");
-                    CleanupTask(task, disposeMeshDataArray: true);
-                    continue;
-                }
-
-                if (!IsTaskTargetStillValid(task))
-                {
-                    CleanupTask(task, disposeMeshDataArray: true);
-                    continue;
-                }
-
-                ProcessTaskResolve(task);
+                FinalizeStateOneTask(task);
             }
         }
+    }
 
-        sw.Stop();
+    private void FinalizeStateOneTask(PendingSliceTask task)
+    {
+        try
+        {
+            task.MainJobHandle.Complete();
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"[SlicerTaskManager] Phase 1 Job Error: {e.Message}\n{e.StackTrace}");
+            CleanupTask(task, disposeMeshDataArray: true);
+            return;
+        }
+
+        if (!IsTaskTargetStillValid(task))
+        {
+            CleanupTask(task, disposeMeshDataArray: true);
+            return;
+        }
+
+        ProcessTaskResolve(task);
+    }
+
+    private static void PreparePhaseSixResources(ref PendingSliceTask task, int loopCount)
+    {
+        if (task.Context.MeshDataStream.IsCreated)
+        {
+            task.Context.MeshDataStream.Dispose();
+            task.Context.MeshDataStream = default;
+        }
+
+        if (task.Context.MeshDataArray.Length > 0)
+        {
+            task.Context.MeshDataArray.Dispose();
+            task.Context.MeshDataArray = default;
+        }
+
+        if (task.Context.LoopPhysicsData.IsCreated)
+        {
+            task.Context.LoopPhysicsData.Dispose();
+            task.Context.LoopPhysicsData = default;
+        }
+
+        task.Context.MeshDataStream = new Unity.Collections.NativeStream(loopCount, Unity.Collections.Allocator.Persistent);
+        task.Context.MeshDataArray = Mesh.AllocateWritableMeshData(loopCount);
+        task.Context.LoopPhysicsData = new Unity.Collections.NativeArray<SlicerCore.FragmentPhysicsData>(
+            loopCount,
+            Unity.Collections.Allocator.Persistent,
+            Unity.Collections.NativeArrayOptions.ClearMemory);
     }
 
     private void ProcessTaskResolve(PendingSliceTask task)

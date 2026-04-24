@@ -26,7 +26,7 @@ public class SliceContext : IDisposable
     // ---- Phase 6 搭桥合并 + 三角剖分 Job 输出 (由 BuildSolidHoleMapJob + MergeTriangulateJob 写入) ----
     public NativeList<int2> SolidHoleMap;   // 等长于 LoopRanges: solid→(holeStart, holeCount)，非solid=(-1,0)
     public NativeList<int2> HoleRangeBuffer; // 扁平化存储所有 solid 对应的孔洞范围
-    public NativeStream MeshDataStream;      // MergeTriangulateJob 的输出流
+    public NativeStream MeshDataStream;      // MergeTriangulateJob 的输出流。会跨帧保留到 Phase 6 完成，因此必须使用 Persistent。
     public float4 UVRect;                    // (minX, minY, width, height) UV 参照矩形
     public UnityEngine.Mesh.MeshDataArray MeshDataArray; // 分配的 WritableMeshData
     public NativeArray<SlicerCore.FragmentPhysicsData> LoopPhysicsData; // 最终碎片级物理几何数据
@@ -89,6 +89,7 @@ public class SliceContext : IDisposable
             SolidHoleMap.Clear();
             HoleRangeBuffer.Clear();
             if (LoopPhysicsData.IsCreated) { LoopPhysicsData.Dispose(); LoopPhysicsData = default; }
+            // Phase 6 的 MeshDataStream 允许跨帧存活，统一在 Context 回收点释放。
             if (MeshDataStream.IsCreated) { MeshDataStream.Dispose(); MeshDataStream = default; }
             // Dispose MeshDataArray if it was not consumed by ApplyAndDisposeWritableMeshData
             if (MeshDataArray.Length > 0) { MeshDataArray.Dispose(); MeshDataArray = default; }
