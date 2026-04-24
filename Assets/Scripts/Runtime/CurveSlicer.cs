@@ -200,6 +200,8 @@ public static class CurveSlicer
             context
         );
         PooledSlicePiece targetPiece = Slicer.CaptureTaskLease(target, out int targetVersion);
+        Unity.Mathematics.float2 scaleAbs = Slicer.GetAbsoluteLossyScale(target.transform);
+        float originalScaledArea = Slicer.CalculateScaledNetArea(polyCollider, scaleAbs);
 
         PendingSliceTask task = new PendingSliceTask
         {
@@ -211,7 +213,9 @@ public static class CurveSlicer
             CurveCutPathArray = nativeCutPath,
             IsCurve = true,
             TargetPiece = targetPiece,
-            TargetVersion = targetVersion
+            TargetVersion = targetVersion,
+            OriginalScaledArea = originalScaledArea,
+            ScaleAbs = scaleAbs
         };
 
         // 解放主线程：把返回凭证塞进任务中心轮询
@@ -344,6 +348,11 @@ public static class CurveSlicer
         }.Schedule(simplifyHandle);
 
         // 6. 组装异步任务交接
+        int targetVersion;
+        PooledSlicePiece targetPiece = Slicer.CaptureTaskLease(target, out targetVersion);
+        Unity.Mathematics.float2 scaleAbs = Slicer.GetAbsoluteLossyScale(target.transform);
+        float originalScaledArea = Slicer.CalculateScaledNetArea(target.GetComponent<PolygonCollider2D>(), scaleAbs);
+
         PendingSliceTask task = new PendingSliceTask
         {
             Context = sys,
@@ -351,12 +360,13 @@ public static class CurveSlicer
             NativeData = nativeData,
             UVReferenceRect = referenceRect,
             MainJobHandle = classifyHandle,
-            TargetPiece = Slicer.CaptureTaskLease(target, out int targetVersion),
+            TargetPiece = targetPiece,
             TargetVersion = targetVersion,
             IsCurve = true,
+            OriginalScaledArea = originalScaledArea,
+            ScaleAbs = scaleAbs,
             IsPureHolePunch = true // 状态机硬隔离
         };
-
         SlicerTaskManager.Instance.Enqueue(task);
         // 注意：原先的 Object.Destroy(target) 已删除，生命周期管理移交至 SlicerTaskManager 末端
     }

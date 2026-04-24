@@ -18,6 +18,8 @@ public struct PendingSliceTask
     public bool IsPureHolePunch;
     public PooledSlicePiece TargetPiece;
     public int TargetVersion;
+    public float OriginalScaledArea;
+    public float2 ScaleAbs;
 }
 
 public class SlicerTaskManager : MonoBehaviour
@@ -95,6 +97,10 @@ public class SlicerTaskManager : MonoBehaviour
                 int loopCount = task.Context.LoopRanges.Length;
                 task.Context.MeshDataStream = new Unity.Collections.NativeStream(loopCount, Unity.Collections.Allocator.TempJob);
                 task.Context.MeshDataArray = Mesh.AllocateWritableMeshData(loopCount);
+                task.Context.LoopPhysicsData = new Unity.Collections.NativeArray<SlicerCore.FragmentPhysicsData>(
+                    loopCount,
+                    Unity.Collections.Allocator.Persistent,
+                    Unity.Collections.NativeArrayOptions.ClearMemory);
 
                 JobHandle prepHandle = new SlicerCore.BuildSolidHoleMapJob
                 {
@@ -113,7 +119,9 @@ public class SlicerTaskManager : MonoBehaviour
                     SolidHoleMap = task.Context.SolidHoleMap.AsDeferredJobArray(),
                     HoleRangeBuffer = task.Context.HoleRangeBuffer.AsDeferredJobArray(),
                     UVRect = task.Context.UVRect,
-                    MeshDataWriter = task.Context.MeshDataStream.AsWriter()
+                    ScaleAbs = task.ScaleAbs,
+                    MeshDataWriter = task.Context.MeshDataStream.AsWriter(),
+                    LoopPhysicsData = task.Context.LoopPhysicsData
                 }.Schedule(loopCount, 1, prepHandle);
 
                 JobHandle buildMeshHandle = new SlicerCore.BuildMeshDataJob
@@ -174,8 +182,10 @@ public class SlicerTaskManager : MonoBehaviour
             }
 
             Rigidbody2D originalRb = task.Target.GetComponent<Rigidbody2D>();
+            PolygonCollider2D originalCollider = task.Target.GetComponent<PolygonCollider2D>();
             MeshRenderer meshRenderer = task.Target.GetComponent<MeshRenderer>();
             Material mat = meshRenderer != null ? meshRenderer.sharedMaterial : null;
+            float baseDensity = Slicer.CalculateFragmentDensity(originalRb, originalCollider, task.OriginalScaledArea);
 
             int loopCount = task.Context.LoopRanges.Length;
             resultMeshes = SliceMeshArrayPool.Rent(loopCount);
@@ -218,7 +228,7 @@ public class SlicerTaskManager : MonoBehaviour
 
                 int2 outerRange = task.Context.LoopRanges[i];
                 int2 holeData = task.Context.SolidHoleMap[i];
-                float area = task.Context.LoopAreas[i];
+                SlicerCore.FragmentPhysicsData physicsData = task.Context.LoopPhysicsData[i];
 
                 bool success = Slicer.CreateSlicedObjectFromMesh(
                     piece,
@@ -230,7 +240,8 @@ public class SlicerTaskManager : MonoBehaviour
                     mesh,
                     outerRange,
                     holeData,
-                    area);
+                    physicsData,
+                    baseDensity);
 
                 if (!success)
                 {

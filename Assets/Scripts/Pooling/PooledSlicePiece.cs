@@ -83,6 +83,7 @@ public class PooledSlicePiece : MonoBehaviour
         Rigidbody2D.angularVelocity = 0f;
         Rigidbody2D.Sleep();
         Rigidbody2D.simulated = false;
+        Rigidbody2D.useAutoMass = false;
 
         SliceableGenerator.hasUVReference = true;
         SliceableGenerator.uvReferenceRect = uvReferenceRect;
@@ -90,7 +91,6 @@ public class PooledSlicePiece : MonoBehaviour
 
         if (sourceBody != null)
         {
-            Rigidbody2D.useAutoMass = sourceBody.useAutoMass;
             Rigidbody2D.linearDamping = sourceBody.linearDamping;
             Rigidbody2D.angularDamping = sourceBody.angularDamping;
             Rigidbody2D.gravityScale = sourceBody.gravityScale;

@@ -19,6 +19,14 @@ public static partial class SlicerCore
         public float2 UV;
     }
 
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    public struct FragmentPhysicsData
+    {
+        public float ScaledArea;
+        public float2 LocalCenter;
+        public float GeometricInertia;
+    }
+
     // =================================================================================
     //                    Phase 5 原生路径简化与环分类 Job
     // =================================================================================
@@ -274,12 +282,15 @@ public static partial class SlicerCore
         [ReadOnly] public NativeArray<int2> HoleRangeBuffer;
 
         public float4 UVRect; // (minX, minY, width, height)
+        public float2 ScaleAbs;
 
         public NativeStream.Writer MeshDataWriter;
+        public NativeArray<FragmentPhysicsData> LoopPhysicsData;
 
         public void Execute(int index)
         {
             MeshDataWriter.BeginForEachIndex(index);
+            LoopPhysicsData[index] = default;
 
             if (LoopTypes[index] != 1)
             {
@@ -293,6 +304,7 @@ public static partial class SlicerCore
             // Phase 6a: Burst 搭桥合并
             NativeList<float2> merged = PolygonHoleMerger.MergeBurst(
                 FlattenedLoops, outerRange, HoleRangeBuffer, holeData.x, holeData.y);
+            LoopPhysicsData[index] = ComputeFragmentPhysicsData(merged.AsArray(), ScaleAbs);
 
             // Phase 6b: Burst 三角剖分
             NativeList<int> triangles = new NativeList<int>(math.max((merged.Length - 2) * 3, 0), Allocator.Temp);
@@ -328,6 +340,53 @@ public static partial class SlicerCore
             triangles.Dispose();
 
             MeshDataWriter.EndForEachIndex();
+        }
+
+        private static FragmentPhysicsData ComputeFragmentPhysicsData(NativeArray<float2> merged, float2 scaleAbs)
+        {
+            FragmentPhysicsData result = default;
+            if (merged.Length < 3)
+            {
+                return result;
+            }
+
+            float2 safeScale = math.max(scaleAbs, new float2(1e-6f, 1e-6f));
+            float areaSum = 0f;
+            float cxSum = 0f;
+            float cySum = 0f;
+            float iOriginSum = 0f;
+
+            for (int i = 0; i < merged.Length; i++)
+            {
+                float2 p1 = merged[i] * safeScale;
+                float2 p2 = merged[(i + 1) % merged.Length] * safeScale;
+                float cross = (p1.x * p2.y) - (p2.x * p1.y);
+
+                areaSum += cross;
+                cxSum += (p1.x + p2.x) * cross;
+                cySum += (p1.y + p2.y) * cross;
+                iOriginSum += cross * (
+                    p1.x * p1.x + p1.x * p2.x + p2.x * p2.x +
+                    p1.y * p1.y + p1.y * p2.y + p2.y * p2.y);
+            }
+
+            float scaledArea = math.abs(areaSum * 0.5f);
+            if (scaledArea < 1e-6f || math.abs(areaSum) < 1e-6f)
+            {
+                result.ScaledArea = 0f;
+                result.LocalCenter = float2.zero;
+                result.GeometricInertia = 1e-6f;
+                return result;
+            }
+
+            float2 worldCentroid = new float2(cxSum, cySum) / (3f * areaSum);
+            float iOrigin = math.abs(iOriginSum / 12f);
+            float geometricInertia = iOrigin - scaledArea * math.dot(worldCentroid, worldCentroid);
+
+            result.ScaledArea = scaledArea;
+            result.LocalCenter = worldCentroid / safeScale;
+            result.GeometricInertia = math.max(geometricInertia, 1e-6f);
+            return result;
         }
     }
 

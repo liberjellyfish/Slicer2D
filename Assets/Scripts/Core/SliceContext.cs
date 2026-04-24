@@ -29,6 +29,7 @@ public class SliceContext : IDisposable
     public NativeStream MeshDataStream;      // MergeTriangulateJob 的输出流
     public float4 UVRect;                    // (minX, minY, width, height) UV 参照矩形
     public UnityEngine.Mesh.MeshDataArray MeshDataArray; // 分配的 WritableMeshData
+    public NativeArray<SlicerCore.FragmentPhysicsData> LoopPhysicsData; // 最终碎片级物理几何数据
 
     // ---- 拓扑重建托管容器 (用于 Phase 3 还原为 Unity Mesh) ----
     public Stack<List<Vector2>> ListPool;
@@ -87,6 +88,7 @@ public class SliceContext : IDisposable
             HoleParents.Clear();
             SolidHoleMap.Clear();
             HoleRangeBuffer.Clear();
+            if (LoopPhysicsData.IsCreated) { LoopPhysicsData.Dispose(); LoopPhysicsData = default; }
             if (MeshDataStream.IsCreated) { MeshDataStream.Dispose(); MeshDataStream = default; }
             // Dispose MeshDataArray if it was not consumed by ApplyAndDisposeWritableMeshData
             if (MeshDataArray.Length > 0) { MeshDataArray.Dispose(); MeshDataArray = default; }
@@ -138,6 +140,7 @@ public class SliceContext : IDisposable
         if (HoleParents.IsCreated) HoleParents.Dispose();
         if (SolidHoleMap.IsCreated) SolidHoleMap.Dispose();
         if (HoleRangeBuffer.IsCreated) HoleRangeBuffer.Dispose();
+        if (LoopPhysicsData.IsCreated) LoopPhysicsData.Dispose();
         if (MeshDataStream.IsCreated) MeshDataStream.Dispose();
         if (MeshDataArray.Length > 0) MeshDataArray.Dispose();
     }

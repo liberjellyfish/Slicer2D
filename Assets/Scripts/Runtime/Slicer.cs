@@ -5,6 +5,10 @@ using UnityEngine;
 
 public static class Slicer
 {
+    private const float MIN_SCALED_AREA = 1e-6f;
+    private const float MIN_FRAGMENT_MASS = 0.01f;
+    private const float MIN_FRAGMENT_INERTIA = 1e-4f;
+
     public static void Slice(GameObject target, Vector3 worldStart, Vector3 worldEnd)
     {
         PolygonCollider2D polyCollider = target.GetComponent<PolygonCollider2D>();
@@ -52,6 +56,8 @@ public static class Slicer
             context);
 
         PooledSlicePiece targetPiece = CaptureTaskLease(target, out int targetVersion);
+        float2 scaleAbs = GetAbsoluteLossyScale(target.transform);
+        float originalScaledArea = CalculateScaledNetArea(polyCollider, scaleAbs);
 
         PendingSliceTask task = new PendingSliceTask
         {
@@ -62,7 +68,9 @@ public static class Slicer
             MainJobHandle = handle,
             IsCurve = false,
             TargetPiece = targetPiece,
-            TargetVersion = targetVersion
+            TargetVersion = targetVersion,
+            OriginalScaledArea = originalScaledArea,
+            ScaleAbs = scaleAbs
         };
 
         SlicerTaskManager.Instance.Enqueue(task);
@@ -279,7 +287,12 @@ public static class Slicer
                 newRb.sharedMaterial = originalRb.sharedMaterial;
                 newRb.linearVelocity = originalRb.linearVelocity;
                 newRb.angularVelocity = originalRb.angularVelocity;
-                ApplyMassSettings(newRb, originalRb, data.Area);
+                ApplyLegacyFragmentPhysics(
+                    newRb,
+                    originalRb,
+                    originalTemplate.GetComponent<PolygonCollider2D>(),
+                    data.Area,
+                    originalTemplate.transform);
             }
         }
         finally
@@ -299,7 +312,8 @@ public static class Slicer
         Mesh mesh,
         int2 outerRange,
         int2 holeData,
-        float area)
+        SlicerCore.FragmentPhysicsData physicsData,
+        float baseDensity)
     {
         if (piece == null || originalObj == null || nativeCtx == null || mesh == null)
         {
@@ -391,7 +405,7 @@ public static class Slicer
             rb.sharedMaterial = originalRb.sharedMaterial;
             rb.linearVelocity = originalRb.linearVelocity;
             rb.angularVelocity = originalRb.angularVelocity;
-            ApplyMassSettings(rb, originalRb, area);
+            ApplyFragmentPhysics(rb, physicsData, baseDensity);
         }
 
         piece.CompleteSpawn(originalRb != null);
@@ -427,20 +441,105 @@ public static class Slicer
         }
     }
 
-    private static void ApplyMassSettings(Rigidbody2D targetRb, Rigidbody2D sourceRb, float area)
+    internal static float CalculateFragmentDensity(Rigidbody2D sourceRb, PolygonCollider2D sourceCollider, float originalScaledArea)
     {
-        if (targetRb == null || sourceRb == null)
+        if (sourceRb == null)
+        {
+            return 1f;
+        }
+
+        if (sourceRb.useAutoMass && sourceCollider != null)
+        {
+            return Mathf.Max(sourceCollider.density, 1e-4f);
+        }
+
+        return Mathf.Max(sourceRb.mass / Mathf.Max(originalScaledArea, MIN_SCALED_AREA), 1e-4f);
+    }
+
+    internal static float2 GetAbsoluteLossyScale(Transform targetTransform)
+    {
+        Vector3 lossyScale = targetTransform.lossyScale;
+        return new float2(Mathf.Abs(lossyScale.x), Mathf.Abs(lossyScale.y));
+    }
+
+    internal static float CalculateScaledNetArea(PolygonCollider2D col, float2 scaleAbs)
+    {
+        if (col == null || col.pathCount == 0)
+        {
+            return MIN_SCALED_AREA;
+        }
+
+        float localArea = 0f;
+        for (int i = 0; i < col.pathCount; i++)
+        {
+            Vector2[] path = col.GetPath(i);
+            float signedArea = SignedArea(path);
+            if (i == 0)
+            {
+                localArea += Mathf.Abs(signedArea);
+            }
+            else
+            {
+                localArea -= Mathf.Abs(signedArea);
+            }
+        }
+
+        float scaledArea = Mathf.Abs(localArea) * Mathf.Max(scaleAbs.x * scaleAbs.y, MIN_SCALED_AREA);
+        return Mathf.Max(scaledArea, MIN_SCALED_AREA);
+    }
+
+    private static void ApplyFragmentPhysics(Rigidbody2D targetRb, SlicerCore.FragmentPhysicsData physicsData, float baseDensity)
+    {
+        if (targetRb == null)
         {
             return;
         }
 
-        if (sourceRb.useAutoMass)
-        {
-            targetRb.useAutoMass = true;
-            return;
-        }
+        float safeDensity = Mathf.Max(baseDensity, 1e-4f);
+        float finalMass = Mathf.Max(physicsData.ScaledArea * safeDensity, MIN_FRAGMENT_MASS);
+        float finalInertia = Mathf.Max(physicsData.GeometricInertia * safeDensity, MIN_FRAGMENT_INERTIA);
 
         targetRb.useAutoMass = false;
-        targetRb.mass = sourceRb.mass * (area / 10f);
+        targetRb.mass = finalMass;
+        targetRb.centerOfMass = new Vector2(physicsData.LocalCenter.x, physicsData.LocalCenter.y);
+        targetRb.inertia = finalInertia;
+    }
+
+    private static void ApplyLegacyFragmentPhysics(
+        Rigidbody2D targetRb,
+        Rigidbody2D sourceRb,
+        PolygonCollider2D sourceCollider,
+        float localArea,
+        Transform sourceTransform)
+    {
+        if (targetRb == null || sourceRb == null || sourceTransform == null)
+        {
+            return;
+        }
+
+        float2 scaleAbs = GetAbsoluteLossyScale(sourceTransform);
+        float scaledArea = Mathf.Max(Mathf.Abs(localArea) * Mathf.Max(scaleAbs.x * scaleAbs.y, MIN_SCALED_AREA), MIN_SCALED_AREA);
+        float baseDensity = CalculateFragmentDensity(sourceRb, sourceCollider, CalculateScaledNetArea(sourceCollider, scaleAbs));
+
+        targetRb.useAutoMass = false;
+        targetRb.mass = Mathf.Max(scaledArea * baseDensity, MIN_FRAGMENT_MASS);
+    }
+
+    private static float SignedArea(IReadOnlyList<Vector2> points)
+    {
+        if (points == null || points.Count < 3)
+        {
+            return 0f;
+        }
+
+        float area = 0f;
+        for (int i = 0; i < points.Count; i++)
+        {
+            Vector2 p1 = points[i];
+            Vector2 p2 = points[(i + 1) % points.Count];
+            area += (p1.x * p2.y) - (p2.x * p1.y);
+        }
+
+        return area * 0.5f;
     }
 }
