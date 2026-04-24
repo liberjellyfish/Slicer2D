@@ -24,6 +24,9 @@ public struct PendingSliceTask
 
 public class SlicerTaskManager : MonoBehaviour
 {
+    private const int MAX_MAIN_THREAD_BUDGET_MS = 4;
+    private const int MAX_TASK_COMPLETIONS_PER_FRAME = 8;
+
     private static SlicerTaskManager _instance;
 
     public static SlicerTaskManager Instance
@@ -46,6 +49,7 @@ public class SlicerTaskManager : MonoBehaviour
     public void Enqueue(PendingSliceTask task)
     {
         activeTasks.Add(task);
+        JobHandle.ScheduleBatchedJobs();
     }
 
     private void Update()
@@ -56,19 +60,21 @@ public class SlicerTaskManager : MonoBehaviour
         }
 
         System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+        int completedTasksThisFrame = 0;
 
         // 优先消费已经完成 Mesh Build 的任务，减少跨帧积压。
-        ProcessCompletedStateOneTasks(sw);
-        ProcessRemainingTasks(sw);
+        ProcessCompletedStateOneTasks(sw, ref completedTasksThisFrame);
+        ProcessRemainingTasks(sw, ref completedTasksThisFrame);
 
         sw.Stop();
     }
 
-    private void ProcessCompletedStateOneTasks(System.Diagnostics.Stopwatch sw)
+    private void ProcessCompletedStateOneTasks(System.Diagnostics.Stopwatch sw, ref int completedTasksThisFrame)
     {
         for (int i = activeTasks.Count - 1; i >= 0; i--)
         {
-            if (sw.ElapsedMilliseconds > 4)
+            if (sw.ElapsedMilliseconds > MAX_MAIN_THREAD_BUDGET_MS ||
+                completedTasksThisFrame >= MAX_TASK_COMPLETIONS_PER_FRAME)
             {
                 break;
             }
@@ -80,15 +86,16 @@ public class SlicerTaskManager : MonoBehaviour
             }
 
             activeTasks.RemoveAt(i);
-            FinalizeStateOneTask(task);
+            FinalizeStateOneTask(task, ref completedTasksThisFrame);
         }
     }
 
-    private void ProcessRemainingTasks(System.Diagnostics.Stopwatch sw)
+    private void ProcessRemainingTasks(System.Diagnostics.Stopwatch sw, ref int completedTasksThisFrame)
     {
         for (int i = activeTasks.Count - 1; i >= 0; i--)
         {
-            if (sw.ElapsedMilliseconds > 4)
+            if (sw.ElapsedMilliseconds > MAX_MAIN_THREAD_BUDGET_MS ||
+                completedTasksThisFrame >= MAX_TASK_COMPLETIONS_PER_FRAME)
             {
                 break;
             }
@@ -103,6 +110,7 @@ public class SlicerTaskManager : MonoBehaviour
                 }
 
                 activeTasks.RemoveAt(i);
+                completedTasksThisFrame++;
 
                 try
                 {
@@ -166,13 +174,15 @@ public class SlicerTaskManager : MonoBehaviour
                 }
 
                 activeTasks.RemoveAt(i);
-                FinalizeStateOneTask(task);
+                FinalizeStateOneTask(task, ref completedTasksThisFrame);
             }
         }
     }
 
-    private void FinalizeStateOneTask(PendingSliceTask task)
+    private void FinalizeStateOneTask(PendingSliceTask task, ref int completedTasksThisFrame)
     {
+        completedTasksThisFrame++;
+
         try
         {
             task.MainJobHandle.Complete();
