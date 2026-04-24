@@ -68,6 +68,11 @@ public class CustomPolygon : MonoBehaviour
         GenerateMesh();
     }
 
+    public void RegenerateMesh()
+    {
+        GenerateMesh();
+    }
+
     [ContextMenu("Refresh Grid")]
     void GenerateMesh()
     {
