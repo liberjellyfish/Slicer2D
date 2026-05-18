@@ -8,7 +8,7 @@ using Unity.Mathematics;
 public static partial class CurveSlicerCore
 {
     /// <summary>
-    /// Phase 1: 异步改造，返回 JobHandle。原托管层代码移交 ResolveCutResult。
+    /// Phase 1: 异步调度曲线切割拓扑管线，返回 JobHandle。
     /// </summary>
     public static JobHandle ScheduleCurveSliceJob(NativeArray<float2> pathVerts, NativeArray<int2> pathRanges, NativeArray<float2> cutPath, SliceContext sys)
     {

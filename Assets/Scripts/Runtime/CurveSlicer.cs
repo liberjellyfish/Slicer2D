@@ -5,6 +5,20 @@ using Unity.Jobs;
 
 public static class CurveSlicer
 {
+    private const float NearClosedPathRatio = 0.08f;
+    private const float NearClosedBoundsRatio = 0.03f;
+
+    private sealed class HolePunchFragment
+    {
+        public List<Vector2> OuterLoop;
+        public readonly List<List<Vector2>> Holes = new List<List<Vector2>>();
+
+        public HolePunchFragment(List<Vector2> outerLoop)
+        {
+            OuterLoop = outerLoop;
+        }
+    }
+
     /// <summary>
     /// 曲线贯穿切割：使用折线路径切割目标物体。
     /// 可以同时处理开放折线切透（直线、抛物线）、跨越边界的闭合环提取（如咬掉一个角）、以及纯净内部挖孔。
@@ -39,27 +53,31 @@ public static class CurveSlicer
 
         bool isPureHolePunch = false;
 
+        // 先进行一次无条件自交净化。即使上游已经把路径标记为闭合，也要防止 8 字路径整体进入挖孔。
+        if (SlicerMath.DetectAndResolveSelfIntersection(localCutPath, out List<Vector2> extractedLoop))
+        {
+            isClosed = true;
+            Debug.Log($"[Slicer] 路径自交闭环，已提取单一闭环并丢弃剩余路径");
+        }
+
         // === Step A: 全面升级的智能闭合与延长策略 ===
         if (!isClosed)
         {
-            // 1. 物理自交检测 (原味笔迹自交，如画了个 "8" 字或相交圈)
-            if (SlicerMath.DetectAndResolveSelfIntersection(localCutPath, out List<Vector2> postExtLoop))
-            {
-                isClosed = true;
-                Debug.Log($"[Slicer] 原始路径自交闭环，切换为闭环模式");
-            }
-            // 2. 强效近似闭合检测 (处理没完全接拢的圈)
+            // 1. 强效近似闭合检测 (处理没完全接拢的圈)
             // 阻断没画拢的圈被当成开路线并产生远端交叉暴射！
-            else if (localCutPath.Count >= 3)
+            if (localCutPath.Count >= 3)
             {
                 float gap = Vector2.Distance(localCutPath[0], localCutPath[localCutPath.Count - 1]);
                 float pathLength = SlicerMath.PolylineLength(localCutPath);
 
-                // 如果首尾距离小于总长度的 25%，或者绝对距离很近，直接视为玩家意图挖孔
-                if (gap < pathLength * 0.25f || gap < referenceRect.width * 0.1f)
+                // 只在“确实差一点接上”时才自动闭合。未命中的路径仍会继续走后续延长与自交闭环检测。
+                float shortSide = Mathf.Max(0.0001f, Mathf.Min(referenceRect.width, referenceRect.height));
+                float nearClosedThreshold = Mathf.Min(pathLength * NearClosedPathRatio, shortSide * NearClosedBoundsRatio);
+
+                if (gap < nearClosedThreshold)
                 {
                     isClosed = true;
-                    Debug.Log($"[Slicer] 路径近似闭合 (Gap: {gap:F2})，自动转为挖孔模式");
+                    Debug.Log($"[Slicer] 路径近似闭合 (Gap: {gap:F2}, Threshold: {nearClosedThreshold:F2})，自动转为闭合模式");
                 }
             }
 
@@ -251,9 +269,7 @@ public static class CurveSlicer
 
         if (loopArea > 0) localLoop.Reverse();
 
-        SlicerCore.PolygonData motherPoly = new SlicerCore.PolygonData();
-        motherPoly.OuterLoop = originalPaths[0];
-        motherPoly.Holes = new List<List<Vector2>>();
+        HolePunchFragment motherPoly = new HolePunchFragment(originalPaths[0]);
         for (int i = 1; i < originalPaths.Count; i++)
         {
             motherPoly.Holes.Add(originalPaths[i]);
@@ -263,9 +279,7 @@ public static class CurveSlicer
         List<Vector2> pieceBoundary = new List<Vector2>(localLoop);
         pieceBoundary.Reverse();
 
-        SlicerCore.PolygonData piecePoly = new SlicerCore.PolygonData();
-        piecePoly.OuterLoop = pieceBoundary;
-        piecePoly.Holes = new List<List<Vector2>>();
+        HolePunchFragment piecePoly = new HolePunchFragment(pieceBoundary);
 
         for (int i = motherPoly.Holes.Count - 2; i >= 0; i--)
         {

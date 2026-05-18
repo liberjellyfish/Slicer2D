@@ -13,7 +13,7 @@ using Unity.Mathematics;
 /// 1. 绕序规范化：强制外圈 CCW，孔洞 CW。
 /// 2. 静态树加速：使用 NativeAABBTree 将几何查询从 O(N) 降至 O(log N)。
 /// 3. NativeArray内存展平：将原本频繁装箱 GC 的双向链表，压平成数组内连续寻址的零开销模式。
-/// Phase C-1: 内部全面 float2 化，消灭 Vector2 装箱，为 MergeNative 通道做准备。
+/// Phase C-1: 内部全面 float2 化，消灭 Vector2 装箱，为 Burst 管线做准备。
 /// </para>
 /// </summary>
 public class PolygonHoleMerger
@@ -156,98 +156,6 @@ public class PolygonHoleMerger
             staticWallTree.Dispose();
         }
     }
-
-    /// <summary>
-    /// Phase C-1: Native 零拷贝合并入口 — 直接从 FlattenedLoops 切片读取，消灭全部中间 List<Vector2> 分配。
-    /// ClassifyLoopsJob 已保证 solid=CCW, hole=CW，无需 EnsureWinding。
-    /// </summary>
-    public static NativeList<float2> MergeNative(NativeArray<float2> flatLoops, int2 outerRange, List<int2> holeRanges, Allocator outputAllocator = Allocator.TempJob)
-    {
-        // 快捷通道：无孔洞时直接批量拷贝，跳过链表构建和 AABB 树（切割最常见场景）
-        if (holeRanges == null || holeRanges.Count == 0)
-        {
-            NativeList<float2> result = new NativeList<float2>(outerRange.y, outputAllocator);
-            var sub = flatLoops.GetSubArray(outerRange.x, outerRange.y);
-            result.AddRange(sub);
-            return result;
-        }
-
-        NativeAABBTree staticWallTree = new NativeAABBTree();
-        staticWallTree.Build(flatLoops, outerRange, holeRanges);
-
-        int totalNodes = outerRange.y;
-        for (int i = 0; i < holeRanges.Count; i++) totalNodes += holeRanges[i].y;
-        int maxNodes = totalNodes + holeRanges.Count * 2;
-
-        NativeArray<NativeListNode> nodes = new NativeArray<NativeListNode>(maxNodes, Allocator.Temp, NativeArrayOptions.UninitializedMemory);
-        int nextFreeIndex = totalNodes;
-
-        try
-        {
-            int outerHead = CreateLoopFromNative(flatLoops, outerRange.x, outerRange.y, ref nodes, 0);
-
-            List<HoleData> holeDatas = new List<HoleData>(holeRanges.Count);
-            int currentOffset = outerRange.y;
-            for (int i = 0; i < holeRanges.Count; i++)
-            {
-                int2 hr = holeRanges[i];
-                if (hr.y < 3) continue;
-
-                int head = CreateLoopFromNative(flatLoops, hr.x, hr.y, ref nodes, currentOffset);
-                currentOffset += hr.y;
-
-                int curr = head;
-                int maxNode = head;
-                float maxX = -float.MaxValue;
-                int count = 0;
-                int watchdog = 0;
-                int watchdogLimit = maxNodes * 2;
-                do
-                {
-                    if (nodes[curr].Position.x > maxX)
-                    {
-                        maxX = nodes[curr].Position.x;
-                        maxNode = curr;
-                    }
-                    curr = nodes[curr].Next;
-                    count++;
-                    watchdog++;
-                    if (watchdog > watchdogLimit) { Debug.LogError("[PolygonHoleMerger] MergeNative Init Watchdog."); break; }
-                } while (curr != head);
-
-                holeDatas.Add(new HoleData { Head = head, Count = count, MaxX = maxX, MaxXNode = maxNode });
-            }
-
-            holeDatas.Sort((a, b) => b.MaxX.CompareTo(a.MaxX));
-
-            List<BridgeSegment> dynamicBridges = new List<BridgeSegment>(holeRanges.Count);
-
-            foreach (var hole in holeDatas)
-            {
-                float2 M = nodes[hole.MaxXNode].Position;
-                int bestP = FindBestBridgePoint(M, outerHead, ref nodes, staticWallTree, dynamicBridges, maxNodes);
-
-                if (bestP != -1)
-                {
-                    float2 P = nodes[bestP].Position;
-                    dynamicBridges.Add(new BridgeSegment { A = M, B = P });
-                    StitchLists(bestP, hole.MaxXNode, ref nodes, ref nextFreeIndex);
-                }
-                else
-                {
-                    Debug.LogWarning($"[PolygonHoleMerger] MergeNative 无法为孔洞找到合法的桥! M点: {M}");
-                }
-            }
-
-            return FlattenListNative(outerHead, ref nodes, maxNodes, outputAllocator);
-        }
-        finally
-        {
-            if (nodes.IsCreated) nodes.Dispose();
-            staticWallTree.Dispose();
-        }
-    }
-
     /// <summary>
     /// Phase 6: Burst 兼容的零拷贝合并入口 — 在 Job 内调用，完全抛弃 managed 引用。
     /// </summary>

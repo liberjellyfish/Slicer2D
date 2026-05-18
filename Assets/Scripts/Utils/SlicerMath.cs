@@ -16,6 +16,7 @@ public static class SlicerMath
     // =========================================================================
     private const float EPSILON_SQ = 1e-8f;   // 距离平方阈值
     private const float EPSILON = 1e-4f;       // 线性阈值
+    private const float LOOP_POINT_EPSILON_SQ = 0.0001f;
 
     // =========================================================================
     //              RDP (Ramer-Douglas-Peucker) 曲线抽稀
@@ -92,6 +93,11 @@ public static class SlicerMath
         extractedLoop = null;
         if (path == null || path.Count < 4) return false;
 
+        if (TryExtractNearDuplicateLoop(path, out extractedLoop))
+        {
+            return true;
+        }
+
         // 从后往前扫描，优先发现最晚出现的（最大的）回路
         // 对每一对不相邻的线段进行碰撞测试
         for (int i = path.Count - 2; i >= 1; i--)
@@ -108,26 +114,69 @@ public static class SlicerMath
                 if (SegmentSegmentIntersect(a, b, c, d, out Vector2 intersection))
                 {
                     // 发现自交！提取从 j+1 到 i 的闭合环
-                    extractedLoop = new List<Vector2>();
-                    //extractedLoop.Add(intersection);
-                    for (int k = j + 1; k <= i; k++)
-                    {
-                        extractedLoop.Add(path[k]);
-                    }
-                    // 完美闭合物理实体环（回到交点）
-                    extractedLoop.Add(intersection);
-
-                    // 截断原始路径：删除环区段以及环之后的部分（脐带尾），也删除环之前的废线头
-                    // 最终只保留纯净闭合环
-                    path.Clear();
-                    path.AddRange(extractedLoop);
-
-                    return true;
+                    return ReplacePathWithExtractedLoop(path, j + 1, i, intersection, out extractedLoop);
                 }
             }
         }
 
         return false;
+    }
+
+    private static bool TryExtractNearDuplicateLoop(List<Vector2> path, out List<Vector2> extractedLoop)
+    {
+        extractedLoop = null;
+
+        for (int i = path.Count - 1; i >= 2; i--)
+        {
+            for (int j = 0; j < i - 1; j++)
+            {
+                if ((path[i] - path[j]).sqrMagnitude > LOOP_POINT_EPSILON_SQ)
+                {
+                    continue;
+                }
+
+                Vector2 closurePoint = (path[i] + path[j]) * 0.5f;
+                return ReplacePathWithExtractedLoop(path, j + 1, i - 1, closurePoint, out extractedLoop);
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ReplacePathWithExtractedLoop(List<Vector2> path, int startIndex, int endIndex, Vector2 closurePoint, out List<Vector2> extractedLoop)
+    {
+        extractedLoop = new List<Vector2>();
+        AddDistinctPoint(extractedLoop, closurePoint, LOOP_POINT_EPSILON_SQ);
+
+        for (int k = startIndex; k <= endIndex; k++)
+        {
+            AddDistinctPoint(extractedLoop, path[k], LOOP_POINT_EPSILON_SQ);
+        }
+
+        if (extractedLoop.Count > 1 &&
+            (extractedLoop[extractedLoop.Count - 1] - extractedLoop[0]).sqrMagnitude <= LOOP_POINT_EPSILON_SQ)
+        {
+            extractedLoop.RemoveAt(extractedLoop.Count - 1);
+        }
+
+        if (extractedLoop.Count < 3)
+        {
+            extractedLoop = null;
+            return false;
+        }
+
+        // 截断原始路径：删除环区段之外的废线头/废线尾，最终只保留一个纯净闭合环。
+        path.Clear();
+        path.AddRange(extractedLoop);
+        return true;
+    }
+
+    private static void AddDistinctPoint(List<Vector2> points, Vector2 point, float minDistSq)
+    {
+        if (points.Count == 0 || (points[points.Count - 1] - point).sqrMagnitude > minDistSq)
+        {
+            points.Add(point);
+        }
     }
 
     /// <summary>

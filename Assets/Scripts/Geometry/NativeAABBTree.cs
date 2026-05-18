@@ -174,7 +174,7 @@ public struct NativeAABBTree : IDisposable
     }
 
     /// <summary>
-    /// 从 FlattenedLoops 的范围切片构建 AABB 树（用于 MergeNative 的零拷贝通道）
+    /// 从 FlattenedLoops 的范围切片构建 AABB 树（托管调用兼容通道）
     /// </summary>
     public void Build(NativeArray<float2> flatLoops, int2 outerRange, List<int2> holeRanges)
     {

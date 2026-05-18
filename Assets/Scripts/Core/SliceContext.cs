@@ -33,7 +33,6 @@ public class SliceContext : IDisposable
 
     // ---- 拓扑重建托管容器 (用于 Phase 3 还原为 Unity Mesh) ----
     public Stack<List<Vector2>> ListPool;
-    public Stack<SlicerCore.PolygonData> PolyPool;
 
     // 容量控制阈值
     private const int INITIAL_CAPACITY = 2048;
@@ -60,7 +59,6 @@ public class SliceContext : IDisposable
         HoleRangeBuffer = new NativeList<int2>(64, Allocator.Persistent);
 
         ListPool = new Stack<List<Vector2>>();
-        PolyPool = new Stack<SlicerCore.PolygonData>();
     }
 
     /// <summary>
@@ -106,25 +104,6 @@ public class SliceContext : IDisposable
         if (list == null) return;
         list.Clear();
         ListPool.Push(list);
-    }
-
-    public SlicerCore.PolygonData GetPoly()
-    {
-        SlicerCore.PolygonData p = PolyPool.Count > 0 ? PolyPool.Pop() : new SlicerCore.PolygonData();
-        p.Init();
-        return p;
-    }
-
-    public void ReturnPoly(SlicerCore.PolygonData p)
-    {
-        if (p == null) return;
-        if (p.OuterLoop != null) ReturnList(p.OuterLoop);
-        if (p.Holes != null)
-        {
-            foreach (var hole in p.Holes) ReturnList(hole);
-            p.Holes.Clear();
-        }
-        PolyPool.Push(p);
     }
 
     public void Dispose()

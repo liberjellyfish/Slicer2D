@@ -13,7 +13,7 @@ using Unity.Mathematics;
 /// 1. 废除托管引用对象 (`VertexNode` class)，整体被替换为 `NativeArray` 的无锁双端指针寻址。
 /// 2. 原生桶排序栅格 (`NativeUniformGrid`)，在内存连贯性状下提升寻值命中率 100%。
 /// 3. 全局采用 `EarClipJob.Run()` 实现主线程单频 Burst 暴走。无分配调度税。
-/// Phase C-2: 内部 float2 统一化，新增 TriangulateNative 零拷贝入口。
+/// Phase C-2: 内部 float2 统一化，供 Burst 管线直接调用。
 /// </para>
 /// </summary>
 public static class Triangulator
@@ -411,27 +411,6 @@ public static class Triangulator
         };
         // 直接调用 Execute() 方法体（不经过 Job 调度系统），Burst 可内联优化
         job.Execute();
-    }
-
-    /// <summary>
-    /// Phase C-2: Native 零拷贝三角剖分入口 — 直接消费 MergeNative 的 NativeList&lt;float2&gt; 输出。
-    /// 调用者拥有返回的 NativeList 并负责 Dispose。
-    /// </summary>
-    public static NativeList<int> TriangulateNative(NativeList<float2> vertices, Allocator outputAllocator = Allocator.TempJob)
-    {
-        int n = vertices.Length;
-        NativeList<int> nativeTriangles = new NativeList<int>(math.max((n - 2) * 3, 0), outputAllocator);
-        if (n < 3) return nativeTriangles;
-
-        EarClipJob job = new EarClipJob
-        {
-            Vertices = vertices.AsArray(),
-            Triangles = nativeTriangles
-        };
-
-        // 零拷贝：输入 NativeList 直接 AsArray() 传入，无中间 NativeArray 分配
-        job.Run();
-        return nativeTriangles;
     }
 
     /// <summary>
